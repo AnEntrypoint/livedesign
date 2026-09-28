@@ -36,7 +36,8 @@ Non-obvious facts only. Everything here was witnessed against the running system
 - Status is `unresponsive` > `broken` > `no_page` > `healthy`, derived only from active errors and page liveness.
 - Build errors are keyed by file and cleared only when that file next checks clean (watcher, tool write or startup scan). Every check also rechecks files that currently have errors.
 - Runtime errors carry the page's client sequence number. An update clears errors older than its `update-start`. `hmr-failed` errors are hidden while a build error exists; messages are normalized (no origin, no `?t=`).
-- A page that renders nothing visible is reported as `blank` (first check 1.5 s after load, ignoring `[data-hmr-chrome]`), healed by one reload, and cleared by a `content` event.
+- A page that renders nothing visible is reported as `blank` (first check 1.5 s after load), healed by one reload, and cleared by a `content` event. Only `#root` is inspected (without `#root`: body children except script/style, `#page-loads` and `[data-hmr-chrome]`), so the load badge never masks a blank page.
+- `server/reporter.js` never throws into app code: `console.error/warn` always reach the original console; repeats of the same message within 1 s are coalesced and log posts pass a token bucket (10, refill 2/s; counts in `__hmrLiveReporter.coalesced/dropped`). Its event stream reopens with jittered backoff when the server refuses it (503 at capacity closes an `EventSource` for good).
 - After a write the tool waits for the page to acknowledge, then a grace window, and forces one scoped reload when the page never picked up a repair, hit `hmr-failed`, or is blank. Post-reload grace is longer than the blank check.
 - Page liveness comes from the page's event stream (`/api/events?page=<id>`): a closed or crashed tab drops it and is removed immediately; a page in an infinite loop keeps it and turns `unresponsive`. A hung frame is rebuilt by `/live/`, which reacts only to its own named frame (`hmr-live-frame`).
 - A server ID in every snapshot lets framed pages reload themselves and `/live/` rebuild its frame when the dev server restarts.
@@ -48,6 +49,14 @@ Non-obvious facts only. Everything here was witnessed against the running system
 - `server/paths.js` is the only constructor of a writable path. Reserved names, `:` (alternate data streams), trailing dot or space, `~` and NTFS junctions are rejected; the deepest existing ancestor is resolved with `realpath`. Arguments are never URL-decoded.
 - Renaming a temp file over a file another process has open fails intermittently with `EPERM` on Windows; `writeAtomically` retries with backoff, falls back to a copy, and always removes the temp file.
 - Editing tools are rate limited (20 a minute) and can be paused. `restore_last_good` uses one snapshot taken when the app has been healthy and quiet for 2 seconds.
+
+## Code execution and secret exposure
+
+- Tailwind runs inside the dev-server process. A stylesheet with `@plugin` or `@config` executes app-supplied JavaScript there, and `@import "../../.env"` echoes `.env` lines into a build error. `server/cssPolicy.js` is a `pre` plugin that rejects both (also escaped at-rule names, non-`.css` or out-of-`app/` relative imports, `source()` outside `app/`) before Tailwind or PostCSS sees the file, following nested imports. Build errors also pass through `redactSecrets`.
+- `app/main.tsx` and `app/index.html` are the harness the error pipeline depends on (shared `createRoot` in `import.meta.hot.data`, remount on renamed component, `data-hmr-chrome` on the load badge so the blank check is not masked). The editing tools can overwrite them; if blank pages stop being detected or renamed components keep the old render, check them first.
+- Regexes over template or file content must be linear: three backtracking patterns took 28-62 s on 512 KB inputs and froze the event loop. Import specifiers come from `parseAst` (`server/moduleSpecifiers.js`), the record scan has a character budget.
+- Origin isolation: the control page is always `http://localhost:PORT/live/` (`127.0.0.1/live` redirects there) and the app frame and the "open in its own tab" link are always `http://127.0.0.1:PORT`. `POST /token`, `/tool`, `/pause` and `GET /config`, `/debug` answer only to Origin hostname `localhost` (`control_origin_required` otherwise), so code running in the app page cannot drive the tools; reporter routes accept both. `server.cors` is off (Vite's default lets any localhost origin read responses). Requests without an Origin header (curl) pass.
+- `upstream.js` follows redirects by hand and checks every hop against the allowlist before requesting it.
 
 ## v0
 

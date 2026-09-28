@@ -4,20 +4,71 @@
   const HEARTBEAT_MS = 2000;
   const pageId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const embedded = window.top !== window;
-  const reporter = { pageId, failures: 0, sequence: 0 };
+  const reporter = { pageId, failures: 0, sequence: 0, coalesced: 0, dropped: 0 };
   window.__hmrLiveReporter = reporter;
 
+  const MAX_DESCRIPTION_CHARS = 4000;
+
   const describe = (value) => {
-    if (value instanceof Error) return value.stack || value.message;
-    if (typeof value === 'string') return value;
+    let text;
     try {
-      return JSON.stringify(value);
+      if (value instanceof Error) text = String(value.stack || value.message);
+      else if (typeof value === 'string') text = value;
+      else text = JSON.stringify(value) ?? String(value);
     } catch {
-      return String(value);
+      try {
+        text = String(value);
+      } catch {
+        text = '[unprintable value]';
+      }
     }
+    return text.length > MAX_DESCRIPTION_CHARS ? text.slice(0, MAX_DESCRIPTION_CHARS) : text;
   };
 
   const isVisible = () => document.visibilityState === 'visible';
+
+  const BUCKET_CAPACITY = 10;
+  const BUCKET_REFILL_PER_SECOND = 2;
+  const REPEAT_WINDOW_MS = 1000;
+  const REPEAT_TABLE_LIMIT = 100;
+  const bucket = { tokens: BUCKET_CAPACITY, at: Date.now() };
+  const recentLogs = new Map();
+
+  const takeToken = () => {
+    const now = Date.now();
+    bucket.tokens = Math.min(BUCKET_CAPACITY, bucket.tokens + ((now - bucket.at) / 1000) * BUCKET_REFILL_PER_SECOND);
+    bucket.at = now;
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+  };
+
+  const isRepeat = (event) => {
+    const now = Date.now();
+    const key = `${event.type}|${event.kind}|${event.file ?? ''}|${event.line ?? ''}|${event.message}`;
+    const last = recentLogs.get(key);
+    if (last !== undefined && now - last < REPEAT_WINDOW_MS) return true;
+    recentLogs.set(key, now);
+    if (recentLogs.size > REPEAT_TABLE_LIMIT) {
+      for (const [entryKey, at] of recentLogs) {
+        if (now - at >= REPEAT_WINDOW_MS) recentLogs.delete(entryKey);
+      }
+      if (recentLogs.size > REPEAT_TABLE_LIMIT) recentLogs.clear();
+    }
+    return false;
+  };
+
+  const postLog = (event) => {
+    if (isRepeat(event)) {
+      reporter.coalesced += 1;
+      return;
+    }
+    if (!takeToken()) {
+      reporter.dropped += 1;
+      return;
+    }
+    post(event);
+  };
 
   const post = (event) => {
     const body = JSON.stringify({ pageId, embedded, frameName: window.name, url: location.pathname, seq: ++reporter.sequence, ...event });
@@ -34,7 +85,7 @@
     if (event.target && event.target !== window) {
       const url = event.target.src || event.target.href || '';
       const critical = event.target.tagName === 'SCRIPT' || event.target.tagName === 'LINK';
-      post({
+      postLog({
         type: critical ? 'error' : 'warn',
         kind: 'resource',
         message: `failed to load ${String(event.target.tagName).toLowerCase()} ${url}`,
@@ -43,21 +94,25 @@
       return;
     }
     const isSyntax = event.error?.name === 'SyntaxError' || /SyntaxError/.test(event.message);
-    post({ type: 'error', kind: isSyntax ? 'syntax' : 'runtime', message: event.message, file: event.filename, line: event.lineno, column: event.colno });
+    postLog({ type: 'error', kind: isSyntax ? 'syntax' : 'runtime', message: event.message, file: event.filename, line: event.lineno, column: event.colno });
   }, true);
 
   window.addEventListener('unhandledrejection', (event) => {
-    post({ type: 'error', kind: 'rejection', message: `unhandled rejection: ${describe(event.reason)}` });
+    postLog({ type: 'error', kind: 'rejection', message: `unhandled rejection: ${describe(event.reason)}` });
   });
 
   for (const level of ['error', 'warn']) {
     const original = console[level].bind(console);
     console[level] = (...values) => {
-      const text = values.map(describe).join(' ');
-      if (!/^\[vite\] Internal Server Error/.test(text)) {
-        post({ type: level, kind: /^\[(?:hmr|vite)\] Failed to reload/.test(text) ? 'hmr-failed' : 'console', message: text });
+      try {
+        const text = values.map(describe).join(' ');
+        if (!/^\[vite\] Internal Server Error/.test(text)) {
+          postLog({ type: level, kind: /^\[(?:hmr|vite)\] Failed to reload/.test(text) ? 'hmr-failed' : 'console', message: text });
+        }
+      } catch {
+        reporter.failures += 1;
       }
-      original(...values);
+      return original(...values);
     };
   }
 
@@ -89,15 +144,26 @@
   const CONTENT_TAGS = new Set(['IMG', 'CANVAS', 'SVG', 'VIDEO', 'IFRAME', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']);
   const blank = { reported: false, since: 0, contentSeen: false };
 
+  const APP_ROOT_ID = 'root';
+  const NON_CONTENT_IDS = new Set(['page-loads']);
+
+  const contentRoots = () => {
+    const appRoot = document.getElementById(APP_ROOT_ID);
+    if (appRoot) return [appRoot];
+    return [...document.body.children].filter((child) => !IGNORED_TAGS.has(child.tagName.toUpperCase()) && !NON_CONTENT_IDS.has(child.id) && !child.closest('[data-hmr-chrome]'));
+  };
+
   const hasVisibleContent = () => {
     if (!document.body) return false;
-    for (const element of document.body.querySelectorAll('*')) {
-      const tag = element.tagName.toUpperCase();
-      if (IGNORED_TAGS.has(tag) || element.closest('hmr-live-overlay, [data-hmr-chrome]')) continue;
-      const rect = element.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      if (CONTENT_TAGS.has(tag)) return true;
-      if ([...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '')) return true;
+    for (const container of contentRoots()) {
+      for (const element of [container, ...container.querySelectorAll('*')]) {
+        const tag = element.tagName.toUpperCase();
+        if (IGNORED_TAGS.has(tag) || element.closest('hmr-live-overlay, [data-hmr-chrome]')) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (CONTENT_TAGS.has(tag)) return true;
+        if ([...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim() !== '')) return true;
+      }
     }
     return false;
   };
@@ -232,17 +298,32 @@
     if (!overlay.host.isConnected) document.documentElement.append(overlay.host);
   };
 
-  const events = new EventSource(`/api/events?page=${encodeURIComponent(pageId)}`);
-  events.addEventListener('status', (event) => {
-    const snapshot = JSON.parse(event.data);
-    if (knownServerId !== null && snapshot.serverId !== knownServerId) {
-      reloadForNewServer();
-      return;
-    }
-    knownServerId = snapshot.serverId;
-    render(snapshot);
-  });
-  events.addEventListener('error', () => {
-    reporter.failures += 1;
-  });
+  const EVENTS_RETRY_BASE_MS = 1000;
+  const EVENTS_RETRY_CAP_MS = 15000;
+  let eventsRetryMs = EVENTS_RETRY_BASE_MS;
+
+  const openEvents = () => {
+    const events = new EventSource(`/api/events?page=${encodeURIComponent(pageId)}`);
+    events.addEventListener('open', () => {
+      eventsRetryMs = EVENTS_RETRY_BASE_MS;
+    });
+    events.addEventListener('status', (event) => {
+      const snapshot = JSON.parse(event.data);
+      if (knownServerId !== null && snapshot.serverId !== knownServerId) {
+        reloadForNewServer();
+        return;
+      }
+      knownServerId = snapshot.serverId;
+      render(snapshot);
+    });
+    events.addEventListener('error', () => {
+      reporter.failures += 1;
+      if (events.readyState !== EventSource.CLOSED) return;
+      events.close();
+      setTimeout(openEvents, eventsRetryMs / 2 + Math.random() * (eventsRetryMs / 2));
+      eventsRetryMs = Math.min(EVENTS_RETRY_CAP_MS, eventsRetryMs * 2);
+    });
+  };
+
+  openEvents();
 })();
