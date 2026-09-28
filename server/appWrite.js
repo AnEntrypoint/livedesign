@@ -13,10 +13,10 @@ export function assertNotProtected(relative) {
   }
 }
 
-export async function assertSafeToWrite(relative, content) {
+export async function assertSafeToWrite(relative, content, lane = 'interactive') {
   const language = languageOf(relative);
   if (language === null) return;
-  const parsed = await parseSafely(content, language);
+  const parsed = await parseSafely(content, language, 'check', lane);
   if (parsed.crashed) {
     throw new ToolError('file_too_complex', `${relative} is too large or too deeply nested to parse safely (${parsed.reason}); split it into smaller files or reduce the nesting`);
   }
@@ -25,5 +25,10 @@ export async function assertSafeToWrite(relative, content) {
 export async function writeAppFile({ absolute, relative }, content) {
   assertNotProtected(relative);
   await assertSafeToWrite(relative, content);
+  return writeAtomically(absolute, content);
+}
+
+export async function writeVettedFile({ absolute, relative }, content) {
+  assertNotProtected(relative);
   return writeAtomically(absolute, content);
 }

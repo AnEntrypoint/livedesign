@@ -169,6 +169,14 @@ export function setBuildErrors(file, errors) {
   publish();
 }
 
+export function setBuildErrorsFromHotPayload(file, errors) {
+  const existing = buildErrors.get(file) ?? [];
+  const incomingIsGeneric = errors.every((error) => error.kind === 'transform');
+  const existingIsMoreSpecific = existing.some((error) => error.kind !== 'transform');
+  if (incomingIsGeneric && existingIsMoreSpecific) return;
+  setBuildErrors(file, errors);
+}
+
 export function filesWithBuildErrors() {
   return [...buildErrors.keys()];
 }

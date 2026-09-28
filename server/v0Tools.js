@@ -3,7 +3,7 @@ import { Type } from '@google/genai';
 import { LIMITS, WRITABLE_EXTENSIONS } from './config.js';
 import { ToolError } from './errors.js';
 import { sandboxed } from './paths.js';
-import { assertNotProtected, assertSafeToWrite, writeAppFile } from './appWrite.js';
+import { assertNotProtected, assertSafeToWrite, writeVettedFile } from './appWrite.js';
 import { stylesheetViolation } from './cssPolicy.js';
 import { beginChange } from './guard.js';
 import { settleChange } from './settle.js';
@@ -73,7 +73,20 @@ export const v0Declarations = [
   },
 ];
 
-async function plansForSuppliedFiles(files) {
+const IMPORT_PARSE_BUDGET_MS = 20000;
+const IMPORT_PARSE_MAX_FAILURES = 3;
+
+function createParseBudget() {
+  return { startedAt: Date.now(), failures: 0 };
+}
+
+function budgetProblem(budget) {
+  if (budget.failures >= IMPORT_PARSE_MAX_FAILURES) return `import stopped after ${budget.failures} files that cannot be parsed safely`;
+  if (Date.now() - budget.startedAt > IMPORT_PARSE_BUDGET_MS) return `import stopped after ${IMPORT_PARSE_BUDGET_MS / 1000}s of checking files`;
+  return null;
+}
+
+async function plansForSuppliedFiles(files, budget, alsoPlanned) {
   const supplied = [];
   const dropped = [];
   for (const { relative, content } of files) {
@@ -84,20 +97,22 @@ async function plansForSuppliedFiles(files) {
       supplied.push({ ...target, content, exists: false });
     }
   }
-  return { supplied: await withoutUnsafeFiles(supplied, dropped), dropped };
+  return { supplied: await withoutUnsafeFiles(supplied, dropped, budget, alsoPlanned), dropped };
 }
 
-async function withoutUnsafeFiles(items, skipped) {
+async function withoutUnsafeFiles(items, skipped, budget, alsoPlanned = []) {
   const safe = [];
+  const planned = [...alsoPlanned, ...items];
   for (const item of items) {
-    const stylesheetProblem = path.extname(item.relative).toLowerCase() === '.css' ? stylesheetViolation(item.content, item.absolute) : null;
-    let problem = stylesheetProblem;
+    let problem = budgetProblem(budget);
+    if (problem === null && path.extname(item.relative).toLowerCase() === '.css') problem = stylesheetViolation(item.content, item.absolute, planned);
     if (problem === null) {
       try {
         assertNotProtected(item.relative);
-        await assertSafeToWrite(item.relative, item.content);
+        await assertSafeToWrite(item.relative, item.content, 'bulk');
       } catch (error) {
         if (!(error instanceof ToolError)) throw error;
+        if (error.code === 'file_too_complex') budget.failures += 1;
         problem = error.message;
       }
     }
@@ -177,12 +192,13 @@ export const v0Handlers = {
     const detail = await v0.loadTemplate(args.id);
     const planned = planImport(detail, args);
     const skipped = planned.skipped;
-    const plan = await withoutUnsafeFiles(planned.plan, skipped);
+    const budget = createParseBudget();
+    const plan = await withoutUnsafeFiles(planned.plan, skipped, budget);
     if (plan.length === 0) return { ok: true, template: args.id, written: [], skipped, note: 'Nothing to write.' };
     const local = await resolveLocalImports({ sources: plan.map((item) => item.content), planned: new Set(plan.map((item) => withoutExtension(item.relative))) });
-    const { supplied, dropped } = await plansForSuppliedFiles(local.added);
+    const { supplied, dropped } = await plansForSuppliedFiles(local.added, budget, plan);
     const change = beginChange();
-    for (const item of [...plan, ...supplied]) await writeAppFile(item, item.content);
+    for (const item of [...plan, ...supplied]) await writeVettedFile(item, item.content);
     const imports = await v0.importsOf(plan.map((item) => ({ path: item.relative, content: item.content })));
     return {
       ok: true,
@@ -204,10 +220,10 @@ export const v0Handlers = {
       throw new ToolError('invalid_argument', 'names must be a non-empty array of shadcn component names such as "dialog"');
     }
     const local = await resolveLocalImports({ sources: args.names.map((name) => `import x from "@/components/ui/${name}"`), planned: new Set() });
-    const { supplied, dropped } = await plansForSuppliedFiles(local.added);
+    const { supplied, dropped } = await plansForSuppliedFiles(local.added, createParseBudget());
     if (supplied.length === 0) return { ok: true, added: [], skipped: dropped, unresolvedImports: local.unresolved, note: 'Everything requested already exists, was skipped for the reasons listed, or is not a shadcn component.' };
     const change = beginChange();
-    for (const item of supplied) await writeAppFile(item, item.content);
+    for (const item of supplied) await writeVettedFile(item, item.content);
     return {
       ok: true,
       added: supplied.map((item) => item.relative),

@@ -1,7 +1,9 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseAst } from 'vite';
+import { languageOf } from './parseLanguage.js';
+import { parseSafely } from './safeParse.js';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -191,6 +193,40 @@ function tailwindSourceScopePlugin() {
   };
 }
 
+const VETTED_CACHE_LIMIT = 500;
+
+function unparseableSourceGatePlugin() {
+  const verdicts = new Map();
+  return {
+    name: 'v0-compat:unparseable-source-gate',
+    enforce: 'pre',
+    async transform(code, id) {
+      if (!isAppSource(id, SOURCE_FILE_PATTERN)) return null;
+      const file = path.normalize(id.split('?')[0]);
+      const language = languageOf(file);
+      if (language === null) return null;
+      let signature;
+      try {
+        const stats = statSync(file);
+        signature = `${stats.mtimeMs}:${stats.size}:${code.length}`;
+      } catch {
+        signature = `${code.length}`;
+      }
+      const known = verdicts.get(file);
+      let verdict = known?.signature === signature ? known.verdict : undefined;
+      if (verdict === undefined) {
+        const parsed = await parseSafely(code, language);
+        verdict = parsed.crashed ? `too large or too deeply nested to compile safely (${parsed.reason}); simplify or split the file` : '';
+        verdicts.delete(file);
+        verdicts.set(file, { signature, verdict });
+        while (verdicts.size > VETTED_CACHE_LIMIT) verdicts.delete(verdicts.keys().next().value);
+      }
+      if (verdict !== '') this.error(`${path.relative(PROJECT_ROOT, file)} is ${verdict}`);
+      return null;
+    },
+  };
+}
+
 export function v0Compat() {
-  return [nextShimsPlugin(), tailwindSourceScopePlugin(), tailwindcss(), react()];
+  return [unparseableSourceGatePlugin(), nextShimsPlugin(), tailwindSourceScopePlugin(), tailwindcss(), react()];
 }

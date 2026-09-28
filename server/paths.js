@@ -4,7 +4,7 @@ import { APP_DIR, LIMITS } from './config.js';
 import { ToolError } from './errors.js';
 
 const RESERVED_NAME = /^(con|prn|aux|nul|conin\$|conout\$|clock\$|com[0-9]|lpt[0-9])[ .]*(\..*)?$/i;
-const FORBIDDEN_CHARS = /[<>:"|?*\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}]/u;
+const FORBIDDEN_CHARS = /[<>:"|?*\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Co}\p{Default_Ignorable_Code_Point}․‥…﹒．｡。]/u;
 const DEPENDENCY_DIRECTORY = 'node_modules';
 const ROOTED = /^([\\/]|[a-zA-Z]:)/;
 
@@ -32,7 +32,7 @@ function segmentsOf(givenPath) {
     throw new ToolError('invalid_path', 'path must be a non-empty string of at most 200 characters');
   }
   const relativePath = givenPath.normalize('NFKC');
-  if (FORBIDDEN_CHARS.test(relativePath)) {
+  if (FORBIDDEN_CHARS.test(givenPath) || FORBIDDEN_CHARS.test(relativePath)) {
     throw new ToolError('invalid_path', 'path contains a forbidden character');
   }
   if (ROOTED.test(relativePath)) {

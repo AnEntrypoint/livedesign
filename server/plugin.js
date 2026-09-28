@@ -4,7 +4,7 @@ import { createApiMiddleware } from './api.js';
 import { closeEventStreams } from './events.js';
 import { stylesheetPolicyPlugin } from './cssPolicy.js';
 import { APP_DIR, APP_RELOAD_PATH, LIMITS, PROJECT_ROOT } from './config.js';
-import { stopParseWorker } from './safeParse.js';
+import { stopParseWorker, warmParseWorker } from './safeParse.js';
 import { diagnose } from './settle.js';
 import { startSnapshotting } from './snapshot.js';
 import { relativeOf } from './diagnostics.js';
@@ -30,7 +30,7 @@ function interceptHotSends(server) {
       if (payload.type === 'error') {
         const file = viteErrorFile(payload.err);
         const message = String(payload.err?.message ?? 'build error').split('\n')[0];
-        status.setBuildErrors(file ?? status.UNKNOWN_BUILD_FILE, [{
+        status.setBuildErrorsFromHotPayload(file ?? status.UNKNOWN_BUILD_FILE, [{
           kind: /Failed to resolve import/.test(message) ? 'resolve' : 'transform',
           file: file ?? null,
           line: payload.err?.loc?.line ?? null,
@@ -155,8 +155,13 @@ function appErrorPipelinePlugin() {
       interceptHotSends(server);
       watchApp(server);
       startSnapshotting(server);
+      warmParseWorker().catch(() => {});
       scanApp(server).catch((error) => server.config.logger.error(`hmr-live startup scan failed: ${error.message}`));
       server.middlewares.use('/api', createApiMiddleware(server));
+    },
+    closeBundle() {
+      closeEventStreams();
+      stopParseWorker();
     },
     transformIndexHtml(_html, context) {
       if (!isInsideDirectory(APP_DIR, context.filename)) return undefined;

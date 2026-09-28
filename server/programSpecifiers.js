@@ -4,7 +4,7 @@ function staticSourceOf(node) {
   if (node.importKind === 'type' || node.exportKind === 'type') return null;
   const source = node.source;
   const isReference = MODULE_REFERENCE_TYPES.has(node.type) && source?.type === 'Literal' && typeof source.value === 'string';
-  return isReference ? source.value : null;
+  return isReference && !source.value.startsWith('node:') ? source.value : null;
 }
 
 export function specifiersOfProgram(program) {

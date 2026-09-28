@@ -1,51 +1,142 @@
 import { fork } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { LIMITS, PROJECT_ROOT } from './config.js';
+import { complexityViolation } from './parseGuard.js';
 
 const WORKER_PATH = path.join(PROJECT_ROOT, 'server', 'parseWorker.js');
-const UNPARSEABLE_TOO_LARGE = { crashed: true, reason: 'too_large' };
-let worker = null;
-let queue = Promise.resolve();
-let nextRequestId = 0;
+const BULK_TIMEOUT_MS = 2500;
+const REFUSE_AFTER_STOP_MS = 2000;
+const START_TIMEOUT_MS = 15000;
+const RESPAWN_DELAY_MS = 100;
+const PING_INTERVAL_MS = 5000;
+const RETIRE_GRACE_MS = 2000;
+const REGISTRY_KEY = Symbol.for('hmr-live.parse-worker-registry');
+const TOO_LARGE = { crashed: true, reason: 'too_large' };
+const SHUTTING_DOWN = { crashed: true, reason: 'shutting_down' };
 
-function startWorker() {
+function createLane(timeoutMs) {
+  return { worker: null, queue: Promise.resolve(), timeoutMs };
+}
+
+const lanes = { interactive: createLane(LIMITS.parseTimeoutMs), bulk: createLane(BULK_TIMEOUT_MS) };
+const registry = (globalThis[REGISTRY_KEY] ??= { current: null, children: new Set(), exitHookInstalled: false });
+const instanceId = randomUUID();
+let nextRequestId = 0;
+let stoppedAt = 0;
+
+function isCurrentInstance() {
+  return registry.current === instanceId;
+}
+
+function retire(child) {
+  child.retired = true;
+  registry.children.delete(child);
+  if (child.connected) child.send({ retire: true }, () => {});
+  setTimeout(() => child.kill(), RETIRE_GRACE_MS).unref();
+}
+
+function claimRegistry() {
+  for (const child of [...registry.children]) if (child.owner !== instanceId) retire(child);
+  registry.current = instanceId;
+  if (registry.exitHookInstalled) return;
+  registry.exitHookInstalled = true;
+  process.once('exit', () => {
+    for (const child of registry.children) child.kill();
+  });
+}
+
+claimRegistry();
+
+const heartbeat = setInterval(() => {
+  if (!isCurrentInstance()) {
+    clearInterval(heartbeat);
+    return;
+  }
+  if (isStopping()) return;
+  for (const lane of Object.values(lanes)) if (lane.worker?.connected) lane.worker.send({ ping: true }, () => {});
+}, PING_INTERVAL_MS);
+heartbeat.unref();
+
+function startWorker(lane) {
   const child = fork(WORKER_PATH, [], {
     execArgv: [`--max-old-space-size=${LIMITS.parseWorkerHeapMb}`],
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     windowsHide: true,
   });
+  child.owner = instanceId;
+  registry.children.add(child);
   child.unref();
   child.channel?.unref();
   child.on('error', () => {});
-  child.on('exit', () => {
-    if (worker === child) worker = null;
+  child.on('exit', (code) => {
+    registry.children.delete(child);
+    if (lane.worker === child) lane.worker = null;
+    if (code !== 0 && !child.retired && isCurrentInstance() && !isStopping()) respawnLater(lane);
+  });
+  child.ready = new Promise((resolve) => {
+    const onReady = (message) => {
+      if (message?.ready !== true) return;
+      child.off('message', onReady);
+      resolve(true);
+    };
+    child.on('message', onReady);
+    child.once('exit', () => resolve(false));
   });
   return child;
 }
 
-function discard(child) {
-  if (worker === child) worker = null;
+function isStopping() {
+  return Date.now() - stoppedAt < REFUSE_AFTER_STOP_MS;
+}
+
+function respawnLater(lane) {
+  const timer = setTimeout(() => {
+    if (lane.worker === null && isCurrentInstance() && !isStopping()) lane.worker = startWorker(lane);
+  }, RESPAWN_DELAY_MS);
+  timer.unref();
+}
+
+function discard(lane, child) {
+  if (lane.worker === child) lane.worker = null;
   child.kill();
 }
 
-function runRequest(request, isRetry = false) {
-  worker ??= startWorker();
-  const child = worker;
+async function runRequest(lane, request, isRetry = false) {
+  lane.worker ??= startWorker(lane);
+  const child = lane.worker;
+  const startTimer = { handle: null };
+  const started = await Promise.race([child.ready, new Promise((resolve) => { startTimer.handle = setTimeout(() => resolve(false), START_TIMEOUT_MS); })]);
+  clearTimeout(startTimer.handle);
+  if (!started) {
+    discard(lane, child);
+    return isRetry ? { crashed: true, reason: 'crashed' } : runRequest(lane, request, true);
+  }
   return new Promise((resolve) => {
-    const finish = (result) => {
+    const detach = () => {
       clearTimeout(timer);
       child.off('message', onMessage);
       child.off('exit', onExit);
+    };
+    const finish = (result) => {
+      detach();
       resolve(result);
     };
     const onMessage = (message) => {
       if (message.id === request.id) finish(message.result);
     };
-    const onExit = () => finish({ crashed: true, reason: 'crashed' });
+    const onExit = (code) => {
+      if (code === 0 && !isRetry) {
+        detach();
+        runRequest(lane, request, true).then(resolve);
+        return;
+      }
+      finish({ crashed: true, reason: 'crashed' });
+    };
     const timer = setTimeout(() => {
-      discard(child);
+      discard(lane, child);
       finish({ crashed: true, reason: 'timeout' });
-    }, LIMITS.parseTimeoutMs);
+    }, lane.timeoutMs);
     child.on('message', onMessage);
     child.on('exit', onExit);
     child.send(request, (error) => {
@@ -53,21 +144,35 @@ function runRequest(request, isRetry = false) {
       clearTimeout(timer);
       child.off('message', onMessage);
       child.off('exit', onExit);
-      discard(child);
+      discard(lane, child);
       if (isRetry) resolve({ crashed: true, reason: 'crashed' });
-      else runRequest(request, true).then(resolve);
+      else runRequest(lane, request, true).then(resolve);
     });
   });
 }
 
-export function parseSafely(code, language, operation = 'check') {
-  if (code.length > LIMITS.maxParseChars) return Promise.resolve(UNPARSEABLE_TOO_LARGE);
-  const run = queue.then(() => runRequest({ id: (nextRequestId += 1), operation, code, language }));
-  queue = run;
+export function parseSafely(code, language, operation = 'check', laneName = 'interactive') {
+  if (isStopping()) return Promise.resolve(SHUTTING_DOWN);
+  if (code.length > LIMITS.maxParseChars) return Promise.resolve(TOO_LARGE);
+  const violation = complexityViolation(code);
+  if (violation !== null) return Promise.resolve({ crashed: true, reason: violation });
+  const lane = lanes[laneName];
+  const run = lane.queue.then(() => runRequest(lane, { id: (nextRequestId += 1), operation, code, language }));
+  lane.queue = run;
   return run;
 }
 
+export async function warmParseWorker() {
+  if (isStopping()) return;
+  const workers = Object.values(lanes).map((lane) => (lane.worker ??= startWorker(lane)));
+  await Promise.all(workers.map((worker) => worker.ready));
+}
+
 export function stopParseWorker() {
-  worker?.kill();
-  worker = null;
+  stoppedAt = Date.now();
+  for (const lane of Object.values(lanes)) {
+    lane.worker?.kill();
+    lane.worker = null;
+  }
+  for (const child of [...registry.children]) if (child.owner === instanceId) child.kill();
 }
