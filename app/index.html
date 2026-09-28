@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App under edit</title>
+  <link rel="icon" href="data:,">
+  <script>
+    (() => {
+      const loads = Number(sessionStorage.getItem('app-loads') || 0) + 1;
+      sessionStorage.setItem('app-loads', String(loads));
+      document.documentElement.dataset.loads = String(loads);
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <p id="page-loads" class="fixed right-3 bottom-3 rounded-md border bg-card px-2 py-1 text-xs text-muted-foreground"></p>
+  <script type="module" src="./main.tsx"></script>
+</body>
+</html>
