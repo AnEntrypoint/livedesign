@@ -31,11 +31,33 @@ async function readJsonBody(request) {
   }
 }
 
-function assertSameOrigin(request) {
+const CONTROL_ROUTES = new Set(['POST /token', 'POST /tool', 'POST /pause', 'GET /config', 'GET /debug']);
+const CONTROL_HOSTNAME = 'localhost';
+
+function assertAllowedOrigin(request, route) {
   const origin = request.headers.origin;
-  if (origin && new URL(origin).host !== request.headers.host) {
+  if (!origin) return;
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new HttpError(403, 'cross_origin_forbidden', 'malformed origin');
+  }
+  if (parsed.host !== request.headers.host) {
     throw new HttpError(403, 'cross_origin_forbidden', 'cross-origin requests are not allowed');
   }
+  if (CONTROL_ROUTES.has(route) && parsed.hostname !== CONTROL_HOSTNAME) {
+    throw new HttpError(403, 'control_origin_required', `this route is only available to the control page at http://${CONTROL_HOSTNAME}:${parsed.port}/live/, not to app pages`);
+  }
+}
+
+const recentTokenMints = [];
+
+function spendTokenAllowance() {
+  const now = Date.now();
+  while (recentTokenMints.length > 0 && now - recentTokenMints[0] > 60 * 1000) recentTokenMints.shift();
+  if (recentTokenMints.length >= LIMITS.tokenMintsPerMinute) throw new HttpError(429, 'token_rate_limited', 'too many session tokens requested; wait a minute');
+  recentTokenMints.push(now);
 }
 
 function sendJson(response, status, body) {
@@ -101,7 +123,10 @@ export function createApiMiddleware(server) {
   const routes = {
     'GET /config': () => liveConfig(),
     'GET /status': () => status.snapshot(),
-    'POST /token': () => mintToken(),
+    'POST /token': () => {
+      spendTokenAllowance();
+      return mintToken();
+    },
     'POST /pause': async (request) => {
       const { paused } = await readJsonBody(request);
       if (typeof paused !== 'boolean') throw new HttpError(400, 'invalid_request', 'paused must be a boolean');
@@ -143,7 +168,7 @@ export function createApiMiddleware(server) {
       return;
     }
     try {
-      assertSameOrigin(request);
+      assertAllowedOrigin(request, route);
       if (streaming) {
         serveEvents(request, response);
         return;

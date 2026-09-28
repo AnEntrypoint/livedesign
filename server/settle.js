@@ -6,9 +6,38 @@ import * as status from './status.js';
 const CONTROL_FRAME_NAME = 'hmr-live-frame';
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+const checkTickets = new Map();
+const CHECK_ATTEMPTS = 4;
+const RETRY_AFTER_CHECK_FAILURE_MS = 250;
+
+async function checkWithRetry(server, relative) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await checkFile(server, relative);
+    } catch (error) {
+      if (attempt >= CHECK_ATTEMPTS) throw error;
+      await sleep(RETRY_AFTER_CHECK_FAILURE_MS);
+    }
+  }
+}
+
+async function recheck(server, relative) {
+  const ticket = (checkTickets.get(relative) ?? 0) + 1;
+  checkTickets.set(relative, ticket);
+  let errors;
+  try {
+    errors = await checkWithRetry(server, relative);
+  } catch (error) {
+    status.noteTrace({ event: 'check-failed', file: relative, message: String(error.message).slice(0, 80) });
+    return;
+  }
+  if (checkTickets.get(relative) === ticket) status.setBuildErrors(relative, errors);
+}
+
 export async function diagnose(server, relativePaths) {
   const targets = new Set([...relativePaths, ...status.filesWithBuildErrors()]);
-  for (const relative of targets) status.setBuildErrors(relative, await checkFile(server, relative));
+  targets.delete(status.UNKNOWN_BUILD_FILE);
+  for (const relative of targets) await recheck(server, relative);
 }
 
 export function requestScopedReload(server) {

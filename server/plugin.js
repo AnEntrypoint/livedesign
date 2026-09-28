@@ -2,7 +2,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createApiMiddleware } from './api.js';
 import { closeEventStreams } from './events.js';
-import { APP_DIR, APP_RELOAD_PATH, LIMITS } from './config.js';
+import { stylesheetPolicyPlugin } from './cssPolicy.js';
+import { APP_DIR, APP_RELOAD_PATH, LIMITS, PROJECT_ROOT } from './config.js';
+import { stopParseWorker } from './safeParse.js';
 import { diagnose } from './settle.js';
 import { startSnapshotting } from './snapshot.js';
 import { relativeOf } from './diagnostics.js';
@@ -28,7 +30,7 @@ function interceptHotSends(server) {
       if (payload.type === 'error') {
         const file = viteErrorFile(payload.err);
         const message = String(payload.err?.message ?? 'build error').split('\n')[0];
-        status.setBuildErrors(file ?? '(unknown)', [{
+        status.setBuildErrors(file ?? status.UNKNOWN_BUILD_FILE, [{
           kind: /Failed to resolve import/.test(message) ? 'resolve' : 'transform',
           file: file ?? null,
           line: payload.err?.loc?.line ?? null,
@@ -76,13 +78,49 @@ function watchApp(server) {
 const SCRIPT_TAG = /<script\b[^>]*>[\s\S]*?<\/script>\s*/g;
 const HMR_SCRIPT = /@vite\/client|@react-refresh/;
 
+const LIVE_DIR = path.join(PROJECT_ROOT, 'live');
+const URL_DECODE_PASSES = 3;
+
+function isInsideDirectory(directory, file) {
+  if (typeof file !== 'string') return false;
+  const relative = path.relative(directory, path.resolve(file));
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function normalizedRequestPath(url) {
+  let decoded = url.split('?')[0];
+  for (let pass = 0; pass < URL_DECODE_PASSES; pass += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  return path.posix.normalize(decoded.replace(/\\/g, '/').replace(/\/{2,}/g, '/')).toLowerCase();
+}
+
+function redirectControlPageToLocalhost(request, response, next) {
+  const host = request.headers.host ?? '';
+  const onLoopbackAddress = /^127\.0\.0\.1(?::\d+)?$/.test(host);
+  const requested = normalizedRequestPath(request.url);
+  if (!onLoopbackAddress || (requested !== '/live' && !requested.startsWith('/live/'))) {
+    next();
+    return;
+  }
+  response.statusCode = 302;
+  response.setHeader('location', `http://localhost${host.slice('127.0.0.1'.length)}${request.url}`);
+  response.end();
+}
+
 function controlPageWithoutHmr() {
   return {
     name: 'hmr-live-control-page-without-hmr',
     transformIndexHtml: {
       order: 'post',
       handler(html, context) {
-        if (!context.path.startsWith('/live/')) return html;
+        if (!isInsideDirectory(LIVE_DIR, context.filename)) return html;
         return html.replace(SCRIPT_TAG, (tag) => (HMR_SCRIPT.test(tag) ? '' : tag));
       },
     },
@@ -90,7 +128,7 @@ function controlPageWithoutHmr() {
 }
 
 export function hmrLivePlugin() {
-  return [appErrorPipelinePlugin(), controlPageWithoutHmr()];
+  return [stylesheetPolicyPlugin(), appErrorPipelinePlugin(), controlPageWithoutHmr()];
 }
 
 function appErrorPipelinePlugin() {
@@ -100,6 +138,7 @@ function appErrorPipelinePlugin() {
       return {
         server: {
           host: '127.0.0.1',
+          cors: false,
           hmr: { overlay: false },
           watch: { ignored: ['**/.gm/**', '**/.hmr-live/**', '**/.agentplug*/**', '**/.env'] },
         },
@@ -109,8 +148,10 @@ function appErrorPipelinePlugin() {
       const close = server.close.bind(server);
       server.close = async () => {
         closeEventStreams();
+        stopParseWorker();
         return close();
       };
+      server.middlewares.use(redirectControlPageToLocalhost);
       interceptHotSends(server);
       watchApp(server);
       startSnapshotting(server);
@@ -118,7 +159,7 @@ function appErrorPipelinePlugin() {
       server.middlewares.use('/api', createApiMiddleware(server));
     },
     transformIndexHtml(_html, context) {
-      if (!context.path.startsWith('/app/')) return undefined;
+      if (!isInsideDirectory(APP_DIR, context.filename)) return undefined;
       return [{ tag: 'script', attrs: { src: '/api/reporter.js' }, injectTo: 'head-prepend' }];
     },
   };

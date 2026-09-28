@@ -25,6 +25,23 @@ function readDotEnv() {
   }
 }
 
+const REDACTION_CACHE_MS = 5000;
+let cachedKey = { readAt: 0, value: null };
+
+export function redactSecrets(text) {
+  const now = Date.now();
+  if (now - cachedKey.readAt > REDACTION_CACHE_MS) {
+    let value = null;
+    try {
+      value = readApiKey();
+    } catch {
+      value = null;
+    }
+    cachedKey = { readAt: now, value };
+  }
+  return cachedKey.value ? String(text).split(cachedKey.value).join('[redacted]') : String(text);
+}
+
 export function readApiKey() {
   const dotEnv = readDotEnv();
   for (const name of API_KEY_NAMES) {

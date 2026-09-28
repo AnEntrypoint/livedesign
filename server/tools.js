@@ -4,8 +4,8 @@ import path from 'node:path';
 import { APP_DIR, LIMITS, WRITABLE_EXTENSIONS } from './config.js';
 import { ToolError } from './errors.js';
 import { sandboxed } from './paths.js';
-import { writeAtomically } from './atomicWrite.js';
-import { beginChange } from './guard.js';
+import { assertNotProtected, writeAppFile } from './appWrite.js';
+import { beginChange, beginRecovery } from './guard.js';
 import { describeCurrentStatus, settleChange, settleReload } from './settle.js';
 import { restoreLastGood } from './snapshot.js';
 import { installPackages } from './packages.js';
@@ -145,15 +145,17 @@ const handlers = {
 
   async write_file(args, context) {
     const { absolute, relative } = sandboxed(args.path);
+    assertNotProtected(relative);
     requireWritableExtension(absolute);
     const content = requireString(args, 'content');
     const change = beginChange();
-    const bytes = await writeAtomically(absolute, content);
+    const bytes = await writeAppFile({ absolute, relative }, content);
     return { ok: true, path: relative, bytes, ...await settleChange(context.server, { changedPaths: [relative], ...change }) };
   },
 
   async edit_file(args, context) {
     const { absolute, relative } = sandboxed(args.path);
+    assertNotProtected(relative);
     requireWritableExtension(absolute);
     const oldString = requireString(args, 'old_string');
     const newString = requireString(args, 'new_string');
@@ -164,12 +166,13 @@ const handlers = {
     if (occurrences === 0) throw new ToolError('old_string_not_found', 'old_string does not occur in the file');
     if (occurrences > 1) throw new ToolError('old_string_not_unique', `old_string occurs ${occurrences} times; include more context`);
     const change = beginChange();
-    const bytes = await writeAtomically(absolute, original.replace(oldString, () => newString));
+    const bytes = await writeAppFile({ absolute, relative }, original.replace(oldString, () => newString));
     return { ok: true, path: relative, bytes, ...await settleChange(context.server, { changedPaths: [relative], ...change }) };
   },
 
   async delete_file(args, context) {
     const { absolute, relative } = sandboxed(args.path);
+    assertNotProtected(relative);
     await statFile(absolute);
     const change = beginChange();
     await fs.unlink(absolute);
@@ -194,7 +197,7 @@ const handlers = {
   },
 
   async restore_last_good(_args, context) {
-    const change = beginChange();
+    const change = beginRecovery();
     const { restored, deleted, touched } = await restoreLastGood();
     return { ok: true, restored, deleted, ...await settleChange(context.server, { changedPaths: touched, ...change }) };
   },

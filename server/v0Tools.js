@@ -3,7 +3,8 @@ import { Type } from '@google/genai';
 import { LIMITS, WRITABLE_EXTENSIONS } from './config.js';
 import { ToolError } from './errors.js';
 import { sandboxed } from './paths.js';
-import { writeAtomically } from './atomicWrite.js';
+import { assertNotProtected, assertSafeToWrite, writeAppFile } from './appWrite.js';
+import { stylesheetViolation } from './cssPolicy.js';
 import { beginChange } from './guard.js';
 import { settleChange } from './settle.js';
 import * as v0 from './v0.js';
@@ -74,11 +75,36 @@ export const v0Declarations = [
 
 async function plansForSuppliedFiles(files) {
   const supplied = [];
+  const dropped = [];
   for (const { relative, content } of files) {
     const target = sandboxed(relative);
-    if (!fs.existsSync(target.absolute)) supplied.push({ ...target, content, exists: false });
+    if (!WRITABLE_EXTENSIONS.has(path.extname(target.absolute).toLowerCase())) {
+      dropped.push({ path: relative, reason: 'file type is not writable through the sandbox' });
+    } else if (!fs.existsSync(target.absolute)) {
+      supplied.push({ ...target, content, exists: false });
+    }
   }
-  return supplied;
+  return { supplied: await withoutUnsafeFiles(supplied, dropped), dropped };
+}
+
+async function withoutUnsafeFiles(items, skipped) {
+  const safe = [];
+  for (const item of items) {
+    const stylesheetProblem = path.extname(item.relative).toLowerCase() === '.css' ? stylesheetViolation(item.content, item.absolute) : null;
+    let problem = stylesheetProblem;
+    if (problem === null) {
+      try {
+        assertNotProtected(item.relative);
+        await assertSafeToWrite(item.relative, item.content);
+      } catch (error) {
+        if (!(error instanceof ToolError)) throw error;
+        problem = error.message;
+      }
+    }
+    if (problem === null) safe.push(item);
+    else skipped.push({ path: item.relative, reason: problem });
+  }
+  return safe;
 }
 
 function planImport(detail, args) {
@@ -149,13 +175,15 @@ export const v0Handlers = {
 
   async v0_import(args, context) {
     const detail = await v0.loadTemplate(args.id);
-    const { plan, skipped } = planImport(detail, args);
+    const planned = planImport(detail, args);
+    const skipped = planned.skipped;
+    const plan = await withoutUnsafeFiles(planned.plan, skipped);
     if (plan.length === 0) return { ok: true, template: args.id, written: [], skipped, note: 'Nothing to write.' };
     const local = await resolveLocalImports({ sources: plan.map((item) => item.content), planned: new Set(plan.map((item) => withoutExtension(item.relative))) });
-    const supplied = await plansForSuppliedFiles(local.added);
+    const { supplied, dropped } = await plansForSuppliedFiles(local.added);
     const change = beginChange();
-    for (const item of [...plan, ...supplied]) await writeAtomically(item.absolute, item.content);
-    const imports = v0.importsOf(plan.map((item) => ({ content: item.content })));
+    for (const item of [...plan, ...supplied]) await writeAppFile(item, item.content);
+    const imports = await v0.importsOf(plan.map((item) => ({ path: item.relative, content: item.content })));
     return {
       ok: true,
       template: args.id,
@@ -163,7 +191,7 @@ export const v0Handlers = {
       written: plan.map((item) => item.relative),
       overwritten: plan.filter((item) => item.exists).map((item) => item.relative),
       addedFromShadcn: supplied.map((item) => item.relative),
-      skipped,
+      skipped: [...skipped, ...dropped],
       missingPackages: [...new Set([...imports.missing, ...local.missingPackages])].sort(),
       unresolvedImports: local.unresolved,
       unsupportedNextImports: imports.unsupportedNext,
@@ -176,13 +204,14 @@ export const v0Handlers = {
       throw new ToolError('invalid_argument', 'names must be a non-empty array of shadcn component names such as "dialog"');
     }
     const local = await resolveLocalImports({ sources: args.names.map((name) => `import x from "@/components/ui/${name}"`), planned: new Set() });
-    const supplied = await plansForSuppliedFiles(local.added);
-    if (supplied.length === 0) return { ok: true, added: [], unresolvedImports: local.unresolved, note: 'Everything requested already exists or is not a shadcn component.' };
+    const { supplied, dropped } = await plansForSuppliedFiles(local.added);
+    if (supplied.length === 0) return { ok: true, added: [], skipped: dropped, unresolvedImports: local.unresolved, note: 'Everything requested already exists, was skipped for the reasons listed, or is not a shadcn component.' };
     const change = beginChange();
-    for (const item of supplied) await writeAtomically(item.absolute, item.content);
+    for (const item of supplied) await writeAppFile(item, item.content);
     return {
       ok: true,
       added: supplied.map((item) => item.relative),
+      skipped: dropped,
       unresolvedImports: local.unresolved,
       missingPackages: local.missingPackages,
       ...await settleChange(context.server, { changedPaths: supplied.map((item) => item.relative), ...change }),

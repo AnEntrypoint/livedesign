@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Github, Linkedin, Mail, ExternalLink, ChevronRight, Menu, X } from "lucide-react"
+import { Code2, Link, Mail, ExternalLink, ChevronRight, Menu, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 
@@ -34,7 +34,6 @@ export default function Portfolio() {
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans">
-      {/* Navigation */}
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container mx-auto flex h-16 items-center justify-between px-4">
           <a href="#" className="text-2xl font-bold tracking-tight">
@@ -56,7 +55,6 @@ export default function Portfolio() {
           </button>
         </div>
 
-        {/* Mobile Navigation */}
         {isMenuOpen && (
           <nav className="md:hidden border-b bg-background p-4 flex flex-col gap-4">
             <a href="#about" className="block px-2 py-1 text-sm font-medium hover:text-primary" onClick={() => setIsMenuOpen(false)}>About</a>
@@ -68,7 +66,6 @@ export default function Portfolio() {
       </header>
 
       <main className="container mx-auto px-4 py-12 md:py-24 flex flex-col gap-24">
-        {/* Hero Section */}
         <section id="about" className="flex flex-col items-start gap-6 max-w-3xl">
           <div className="inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80">
             Available for work
@@ -88,10 +85,10 @@ export default function Portfolio() {
           </div>
           <div className="flex gap-4 mt-4">
             <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
-              <Github className="w-6 h-6" />
+              <Code2 className="w-6 h-6" />
             </a>
             <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
-              <Linkedin className="w-6 h-6" />
+              <Link className="w-6 h-6" />
             </a>
             <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
               <Mail className="w-6 h-6" />
@@ -99,7 +96,6 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* Projects Section */}
         <section id="projects" className="flex flex-col gap-12">
           <div>
             <h2 className="text-3xl font-bold tracking-tight">Featured Projects</h2>
@@ -126,7 +122,7 @@ export default function Portfolio() {
                 </div>
                 <div className="flex items-center p-6 border-t bg-secondary/20 justify-between mt-auto">
                   <Button variant="ghost" size="sm" className="gap-2">
-                    <Github className="w-4 h-4" /> Code
+                    <Code2 className="w-4 h-4" /> Code
                   </Button>
                   <Button variant="default" size="sm" className="gap-2">
                     <ExternalLink className="w-4 h-4" /> Live Demo
@@ -137,7 +133,6 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* Contact Section */}
         <section id="contact" className="border rounded-2xl bg-secondary/10 p-8 md:p-16 flex flex-col items-center text-center gap-6 max-w-4xl mx-auto w-full">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight">Let's work together.</h2>
           <p className="text-xl text-muted-foreground max-w-2xl">
@@ -150,7 +145,6 @@ export default function Portfolio() {
         </section>
       </main>
 
-      {/* Footer */}
       <footer className="border-t py-8 mt-12 text-center text-sm text-muted-foreground">
         <div className="container mx-auto px-4">
           <p>© {new Date().getFullYear()} DevFolio. Built with Next.js & Tailwind CSS.</p>

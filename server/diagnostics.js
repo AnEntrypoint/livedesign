@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { parseAst } from 'vite';
 import { APP_DIR } from './config.js';
+import { languageOf } from './parseLanguage.js';
+import { parseSafely } from './safeParse.js';
 
-const PARSE_LANGUAGE = { '.js': 'js', '.mjs': 'js', '.jsx': 'jsx', '.ts': 'ts', '.tsx': 'tsx' };
+const UNPARSEABLE_MESSAGE = 'file is too large or too deeply nested to parse safely; split it into smaller files or simplify the nesting';
 const ANSI = /\u001b\[[0-9;]*m/g;
+const STALE_SERVER_FAILURE = /being restarted or closed|Request is outdated/i;
 
 function stripAnsi(text) {
   return String(text).replace(ANSI, '');
@@ -50,8 +52,8 @@ function viteFailure(error, file) {
   };
 }
 
-function isCheckable(extension) {
-  return extension in PARSE_LANGUAGE || ['.css', '.json', '.html'].includes(extension);
+function isCheckable(relative, extension) {
+  return languageOf(relative) !== null || ['.css', '.json', '.html'].includes(extension);
 }
 
 export function absoluteOf(relative) {
@@ -66,7 +68,7 @@ export function relativeOf(absolute) {
 
 export async function checkFile(server, relative) {
   const extension = path.extname(relative).toLowerCase();
-  if (!isCheckable(extension)) return [];
+  if (!isCheckable(relative, extension)) return [];
   const absolute = absoluteOf(relative);
   let source;
   try {
@@ -75,16 +77,15 @@ export async function checkFile(server, relative) {
     if (error.code === 'ENOENT') return [];
     throw error;
   }
-  if (extension in PARSE_LANGUAGE) {
-    try {
-      parseAst(source, { lang: PARSE_LANGUAGE[extension] });
-    } catch (error) {
-      return [parseFailure(error, source, relative)];
-    }
+  const language = languageOf(relative);
+  if (language) {
+    const parsed = await parseSafely(source, language);
+    if (parsed.crashed) return [{ kind: 'syntax', file: relative, line: null, column: null, message: UNPARSEABLE_MESSAGE, frame: null }];
+    if (!parsed.ok) return [parseFailure(parsed, source, relative)];
   }
   if (extension === '.json') {
     try {
-      JSON.parse(source);
+      JSON.parse(source.replace(/^﻿/, ''));
     } catch (error) {
       return [{ kind: 'json', file: relative, line: null, column: null, message: error.message, frame: null }];
     }
@@ -99,6 +100,7 @@ export async function checkFile(server, relative) {
       await server.transformRequest(url);
     }
   } catch (error) {
+    if (STALE_SERVER_FAILURE.test(String(error.message))) throw error;
     return [viteFailure(error, relative)];
   }
   return [];

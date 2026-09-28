@@ -21,19 +21,27 @@ export async function startMicrophone({ onChunk }) {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
-  const context = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE });
-  await context.audioWorklet.addModule(new URL('./pcm-capture.worklet.js', import.meta.url));
-  const source = context.createMediaStreamSource(stream);
-  const capture = new AudioWorkletNode(context, 'pcm-capture');
-  const silentSink = context.createGain();
-  silentSink.gain.value = 0;
+  let context = null;
+  let capture = null;
   let muted = false;
-  capture.port.onmessage = (event) => {
-    if (!muted) onChunk(bytesToBase64(new Uint8Array(event.data)));
-  };
-  source.connect(capture);
-  capture.connect(silentSink);
-  silentSink.connect(context.destination);
+  try {
+    context = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE });
+    await context.audioWorklet.addModule(new URL('./pcm-capture.worklet.js', import.meta.url));
+    const source = context.createMediaStreamSource(stream);
+    capture = new AudioWorkletNode(context, 'pcm-capture');
+    const silentSink = context.createGain();
+    silentSink.gain.value = 0;
+    capture.port.onmessage = (event) => {
+      if (!muted) onChunk(bytesToBase64(new Uint8Array(event.data)));
+    };
+    source.connect(capture);
+    capture.connect(silentSink);
+    silentSink.connect(context.destination);
+  } catch (error) {
+    for (const track of stream.getTracks()) track.stop();
+    context?.close().catch(() => {});
+    throw error;
+  }
   return {
     setMuted(value) {
       muted = value;
@@ -41,7 +49,7 @@ export async function startMicrophone({ onChunk }) {
     stop() {
       capture.port.onmessage = null;
       for (const track of stream.getTracks()) track.stop();
-      return context.close();
+      return context.close().catch(() => {});
     },
   };
 }
@@ -74,7 +82,7 @@ export function createPlayback() {
       playing.clear();
       cursor = 0;
     },
-    close: () => context.close(),
+    close: () => context.close().catch(() => {}),
   };
 }
 
@@ -86,9 +94,15 @@ export async function startScreenShare({ onFrame, onEnded, maxWidth = 1280, inte
     selfBrowserSurface: 'include',
   });
   const video = document.createElement('video');
-  video.srcObject = stream;
-  video.muted = true;
-  await video.play();
+  try {
+    video.srcObject = stream;
+    video.muted = true;
+    await video.play();
+  } catch (error) {
+    for (const track of stream.getTracks()) track.stop();
+    video.srcObject = null;
+    throw error;
+  }
   const canvas = document.createElement('canvas');
   const drawing = canvas.getContext('2d');
   let stopped = false;

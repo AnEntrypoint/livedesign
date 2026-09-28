@@ -14,6 +14,7 @@ export const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
 export const EPHEMERAL_API_VERSION = process.env.EPHEMERAL_API_VERSION || null;
 
 export const APP_RELOAD_PATH = '/app/index.html';
+export const PROTECTED_APP_FILES = new Set(['main.tsx', 'index.html']);
 
 export const WRITABLE_EXTENSIONS = new Set([
   '.html', '.js', '.mjs', '.css', '.json', '.svg', '.txt', '.md', '.ts', '.jsx', '.tsx',
@@ -27,7 +28,6 @@ export const LIMITS = {
   maxBodyBytes: 1024 * 1024,
   appLogEntries: 200,
   appLogTextChars: 2000,
-  reloadWaitMs: 4000,
   toolLogRing: 50,
   tokenLifetimeMs: 30 * 60 * 1000,
   newSessionWindowMs: 2 * 60 * 1000,
@@ -45,6 +45,12 @@ export const LIMITS = {
   errorFrameChars: 600,
   watchDebounceMs: 150,
   mutationsPerMinute: 20,
+  tokenMintsPerMinute: 10,
+  parseTimeoutMs: 4000,
+  parseWorkerHeapMb: 384,
+  maxParseChars: 2 * 1024 * 1024,
+  streamReconnectGraceMs: 4000,
+  sseMaxBufferedBytes: 512 * 1024,
   sseMaxClients: 20,
   sseKeepAliveMs: 15000,
   snapshotQuietMs: 2000,
@@ -59,6 +65,7 @@ export const LIMITS = {
   shadcnMaxItems: 40,
   resolveRepairAttempts: 3,
   resolveRepairWaitMs: 2500,
+  minPackageAgeMs: 7 * 24 * 60 * 60 * 1000,
   installMaxPackagesPerCall: 5,
   installMaxPackagesPerHour: 15,
   installTimeoutMs: 240000,
@@ -89,10 +96,11 @@ export const SYSTEM_INSTRUCTION = [
   'The page is app/app/page.tsx, global styles are app/app/globals.css, components live in app/components and shadcn primitives in app/components/ui, helpers in app/lib/utils.ts with the cn function.',
   'Import project files with the @/ alias, for example @/components/ui/button. next/link, next/image, next/navigation and next/font are supported. Use lucide-react for icons.',
   'File tool paths are relative to app/. Read a file before editing it, and prefer edit_file for small changes.',
+  'main.tsx and index.html are the app harness and are protected: tools refuse to change them (protected_file). Put UI code in app/page.tsx and components. Stylesheets cannot use @plugin, @config, or imports outside app/.',
   'Every edit tool returns the real outcome: hmr, status and errors with file, line and code frame. Never say a change worked unless status is healthy.',
   'Tool results include a screen field. When screen.sharing is true you receive a fresh video frame of the app right after every edit: look at it before answering, describe only what you actually see, and if the frame contradicts a healthy status, say so and investigate. When screen.sharing is false you cannot see the app, so never claim a visual result.',
   'To build something, search community templates with v0_search, inspect one with v0_template, read files with v0_read_file, and copy it with v0_import. Then adapt it. v0_template lists packages that are not installed, and after an edit or import any missing npm package that passes a registry safety check is installed automatically; the result lists packages installed or rejected with a reason, and if one is rejected pick another approach or tell the user. v0_import already adds missing shadcn components; use add_ui_component when an import of @/components/ui/<name> cannot be resolved.',
-  'If status is broken, read the errors, fix the code, and check the next result. After two failed fixes call restore_last_good and tell the user what happened.',
+  'If status is broken, read the errors, fix the code, and check the next result. After two failed fixes call restore_last_good once and tell the user what happened; do not repeat it for the same problem.',
   'Vite applies edits automatically. Call refresh_page only when a full reload is truly needed.',
   'Messages that start with SYSTEM NOTICE come from the app tooling, not from the user. They report app errors. Use read_app_log and fix errors that come from recent edits or the current request, and do not narrate them at length.',
   'If a tool returns edits_paused, stop editing and tell the user. Keep spoken replies short and say what you changed.',

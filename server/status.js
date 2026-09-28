@@ -1,8 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { LIMITS } from './config.js';
+import { redactSecrets } from './env.js';
 
 const SERVER_ID = randomUUID();
+export const UNKNOWN_BUILD_FILE = '(unknown)';
+const DEPARTED_PAGE_MEMORY_MS = 30000;
 
 const bus = new EventEmitter();
 bus.setMaxListeners(LIMITS.sseMaxClients + 10);
@@ -10,6 +13,7 @@ bus.setMaxListeners(LIMITS.sseMaxClients + 10);
 const buildErrors = new Map();
 const runtimeErrors = new Map();
 const pages = new Map();
+const departedPages = new Map();
 const acknowledgements = [];
 const state = { editsPaused: false, revision: 0, signature: '', lastHotActivityAt: 0 };
 
@@ -24,8 +28,8 @@ function toRecord(error, extra) {
     file: error.file ?? null,
     line: error.line ?? null,
     column: error.column ?? null,
-    message: String(error.message).slice(0, 1000),
-    frame: error.frame ? String(error.frame).slice(0, LIMITS.errorFrameChars) : null,
+    message: redactSecrets(String(error.message).slice(0, 1000)),
+    frame: error.frame ? redactSecrets(String(error.frame).slice(0, LIMITS.errorFrameChars)) : null,
     since: Date.now(),
     reported: false,
     ...extra,
@@ -98,7 +102,7 @@ export function snapshot() {
 
 function publish() {
   const current = snapshot();
-  const signature = JSON.stringify([current.status, current.editsPaused, current.errors.map((error) => error.id), current.pages.map((page) => [page.id, page.responsive, page.visible])]);
+  const signature = JSON.stringify([current.status, current.editsPaused, current.errors.map((error) => error.id), current.pages.map((page) => [page.id, page.responsive, page.visible, page.socketUp])]);
   if (signature === state.signature) return;
   state.signature = signature;
   state.revision += 1;
@@ -186,6 +190,7 @@ export function addRuntimeError(pageId, error) {
   const record = toRecord({ ...error, message: normalizedMessage(error.message) }, { pageId, seq: error.seq ?? 0 });
   const key = `${pageId}|${record.id}`;
   const existing = runtimeErrors.get(key);
+  runtimeErrors.delete(key);
   runtimeErrors.set(key, existing ? { ...existing, seq: record.seq, count: (existing.count ?? 1) + 1 } : { ...record, count: 1 });
   while (runtimeErrors.size > LIMITS.maxRuntimeErrors) runtimeErrors.delete(runtimeErrors.keys().next().value);
   publish();
@@ -214,10 +219,16 @@ export function pageEvent(pageId, type, detail = {}) {
   if (type !== 'heartbeat') remember({ event: `page-${type}`, page: pageId.slice(0, 6), seq });
   if (type === 'unload') {
     removePage(pageId);
+    departedPages.set(pageId, now);
     publish();
     return;
   }
   let page = pages.get(pageId);
+  if (!page && type !== 'load' && now - (departedPages.get(pageId) ?? -Infinity) < DEPARTED_PAGE_MEMORY_MS) return;
+  if (type === 'load') departedPages.delete(pageId);
+  for (const [departedId, departedAt] of departedPages) {
+    if (now - departedAt >= DEPARTED_PAGE_MEMORY_MS) departedPages.delete(departedId);
+  }
   if (!page || type === 'load') {
     page = { id: pageId, url: detail.url ?? '', embedded: Boolean(detail.embedded), frameName: detail.frameName ?? '', visible: true, loadedAt: now, lastSeen: now, socketUp: true, updateStartSeq: null };
     for (const [otherId, other] of pages) {
@@ -229,6 +240,7 @@ export function pageEvent(pageId, type, detail = {}) {
   if (detail.url) page.url = detail.url;
   if (type === 'load') acknowledge({ at: now, type: 'load', pageId, url: page.url, embedded: page.embedded });
   if (type === 'update-start') page.updateStartSeq = seq;
+  if (type === 'load' || type === 'update') buildErrors.delete(UNKNOWN_BUILD_FILE);
   if (type === 'update') {
     clearRuntimeErrorsBefore(pageId, page.updateStartSeq ?? seq);
     acknowledge({ at: now, type: 'update', pageId, url: page.url, embedded: page.embedded });
@@ -255,6 +267,40 @@ export function markReported(ids) {
 export function expectedPages() {
   pruneForgottenPages();
   return [...pages.values()].filter((page) => page.visible && page.socketUp);
+}
+
+export function everyExpectedPageBeatSince(sinceMs) {
+  return expectedPages().every((page) => page.lastSeen > sinceMs);
+}
+
+export function everyExpectedPageAcknowledgedSince(sinceMs) {
+  return expectedPages().every((page) => isAcknowledged(page, sinceMs));
+}
+
+function connectedPages() {
+  pruneForgottenPages();
+  return [...pages.values()].filter((page) => page.socketUp);
+}
+
+export function hasConnectedPage() {
+  return connectedPages().length > 0;
+}
+
+export function everyConnectedPageBeatSince(sinceMs) {
+  return connectedPages().every((page) => page.lastSeen > sinceMs);
+}
+
+export function everyConnectedPageAcknowledgedSince(sinceMs) {
+  return connectedPages().every((page) => isAcknowledged(page, sinceMs));
+}
+
+export function pageSeenWithin(pageId, windowMs) {
+  const page = pages.get(pageId);
+  return page !== undefined && Date.now() - page.lastSeen < windowMs;
+}
+
+export function forgetDeparture(pageId) {
+  departedPages.delete(pageId);
 }
 
 function isAcknowledged(target, since) {

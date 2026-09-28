@@ -30,20 +30,42 @@ async function readCapped(response) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+const MAX_REDIRECTS = 3;
+
+function assertAllowed(url, origin) {
+  if (!ALLOWED_ORIGINS.has(url.origin) || url.origin !== origin) {
+    throw new ToolError('upstream_not_allowed', `${url.origin} is not an allowed source`);
+  }
+}
+
+async function requestFollowingAllowedRedirects(url, origin, accept, signal) {
+  let current = new URL(url);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    assertAllowed(current, origin);
+    const response = await fetch(current, {
+      headers: { accept, 'user-agent': 'hmr-live-template-lookup/0.1' },
+      redirect: 'manual',
+      signal,
+    });
+    const location = response.headers.get('location');
+    if (response.status < 300 || response.status >= 400 || !location) return response;
+    await response.body?.cancel();
+    current = new URL(location, current);
+  }
+  throw new ToolError('upstream_unexpected_redirect', `${origin} redirected too many times`);
+}
+
 export async function fetchText(url, accept) {
   const origin = new URL(url).origin;
   if (!ALLOWED_ORIGINS.has(origin)) throw new ToolError('upstream_not_allowed', `${origin} is not an allowed source`);
   spendBudget();
   let response;
   try {
-    response = await fetch(url, {
-      headers: { accept, 'user-agent': 'hmr-live-template-lookup/0.1' },
-      signal: AbortSignal.timeout(LIMITS.upstreamTimeoutMs),
-    });
+    response = await requestFollowingAllowedRedirects(url, origin, accept, AbortSignal.timeout(LIMITS.upstreamTimeoutMs));
   } catch (error) {
+    if (error instanceof ToolError) throw error;
     throw new ToolError('upstream_unreachable', `could not reach ${origin}: ${error.message}`);
   }
-  if (new URL(response.url).origin !== origin) throw new ToolError('upstream_unexpected_redirect', `${origin} redirected to another origin`);
   if (response.status === 404) throw new ToolError('upstream_not_found', `${origin} has no such page`);
   if (response.status === 429) throw new ToolError('upstream_rate_limited', `${origin} is rate limiting this server; retry later`);
   if (!response.ok) throw new ToolError('upstream_unavailable', `${origin} answered ${response.status}`);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { LIMITS, PROJECT_ROOT, V0_ORIGIN } from './config.js';
 import { ToolError } from './errors.js';
 import { fetchText } from './upstream.js';
+import { moduleSpecifiersOf } from './moduleSpecifiers.js';
 
 const STATIC_CATEGORIES = [
   ['apps-and-games', 'Apps & Games'],
@@ -25,13 +26,13 @@ const TEMPLATE_ID = /^[A-Za-z0-9]{6,24}$/;
 const RESERVED_SLUGS = new Set(['categories', 'submissions']);
 const FILE_MARKER = /\[V0_FILE\]([A-Za-z0-9_+-]*):file="([^"]*)"([^\n]*)\n/g;
 const FLIGHT_CHUNK = /self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g;
-const IMPORT_SPECIFIER = /(?:import|export)\s[^'";]*?from\s*['"]([^'"]+)['"]|import\s*['"]([^'"]+)['"]|import\(\s*['"]([^'"]+)['"]\s*\)/g;
 const SHIMMED_NEXT_MODULES = new Set(['next/link', 'next/image', 'next/navigation', 'next/font/google', 'next/font/local', 'next/head', 'next/dynamic']);
 
 const SKIPPED = [
   [/^package(-lock)?\.json$|^(pnpm|yarn)-lock|^bun\.lock/, 'dependency manifests are managed by this project'],
   [/^(next|postcss|tailwind|vite|eslint)\.config\.[a-z]+$|^tsconfig[^/]*\.json$|^components\.json$|^next-env\.d\.ts$/, 'project configuration is managed by this project'],
   [/^\.|^README/i, 'not source code'],
+  [/^(main\.tsx|index\.html)$/i, 'the app harness is managed by this project'],
   [/^middleware\.[jt]sx?$|^app\/api\/|\/route\.[jt]sx?$/, 'server-only Next.js file that does not run under Vite'],
   [/^app\/layout\.tsx$/, 'the root layout is not mounted here, page.tsx is'],
   [/\.(test|spec)\.[jt]sx?$/, 'test file'],
@@ -75,10 +76,15 @@ function flightOf(html) {
   return chunks.join('');
 }
 
-function objectEnd(text, start) {
+const RECORD_SCAN_CHARS_PER_OBJECT = 200000;
+const RECORD_SCAN_BUDGET_FACTOR = 4;
+
+function objectEnd(text, start, budget = { remaining: RECORD_SCAN_CHARS_PER_OBJECT }) {
   let depth = 0;
   let inString = false;
   for (let index = start; index < text.length; index += 1) {
+    budget.remaining -= 1;
+    if (budget.remaining < 0) return -1;
     const character = text[index];
     if (inString) {
       if (character === '\\') index += 1;
@@ -95,8 +101,8 @@ function objectEnd(text, start) {
   return -1;
 }
 
-function parseObject(text, start) {
-  const end = objectEnd(text, start);
+function parseObject(text, start, budget) {
+  const end = objectEnd(text, start, budget);
   if (end < 0) return null;
   try {
     return JSON.parse(text.slice(start, end));
@@ -124,8 +130,10 @@ function normalizeRecord(raw) {
 
 function recordsFromFlight(flight) {
   const found = new Map();
+  const budget = { remaining: Math.max(flight.length * RECORD_SCAN_BUDGET_FACTOR, RECORD_SCAN_CHARS_PER_OBJECT) };
   for (const match of flight.matchAll(/\{"blockId":"b_[A-Za-z0-9]+"/g)) {
-    const raw = parseObject(flight, match.index);
+    if (budget.remaining < 0) break;
+    const raw = parseObject(flight, match.index, budget);
     if (raw?.templateCanonId && !found.has(raw.templateCanonId)) found.set(raw.templateCanonId, normalizeRecord(raw));
   }
   return [...found.values()];
@@ -153,14 +161,12 @@ function packageOf(specifier) {
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
 }
 
-export function importsOf(files) {
+export async function importsOf(files) {
   const packages = new Set();
   const unsupportedNext = new Set();
   for (const file of files) {
-    for (const match of file.content.matchAll(IMPORT_SPECIFIER)) {
-      const specifier = match[1] ?? match[2] ?? match[3];
+    for (const specifier of await moduleSpecifiersOf(file.content, file.path)) {
       if (!specifier || /^[./~]/.test(specifier) || specifier.startsWith('@/')) continue;
-      if (/^(?:import|export)\s+type\b/.test(match[0])) continue;
       if (specifier === 'next') continue;
       if (specifier.startsWith('next/')) {
         if (!SHIMMED_NEXT_MODULES.has(specifier)) unsupportedNext.add(specifier);
@@ -326,7 +332,7 @@ export async function search({ query, category, tag, sort, limit }) {
 export async function describeTemplate(id) {
   const detail = await loadTemplate(id);
   const listed = detail.record;
-  const imports = importsOf(detail.files.filter((file) => !skipReason(file.path)));
+  const imports = await importsOf(detail.files.filter((file) => !skipReason(file.path)));
   return {
     id,
     title: listed?.title || detail.title,

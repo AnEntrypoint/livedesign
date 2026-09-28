@@ -8,9 +8,12 @@ import { writeAtomically } from './atomicWrite.js';
 import * as status from './status.js';
 
 const GOOD_PREVIOUS_DIR = `${GOOD_DIR}.previous`;
-const progress = { lastChangeAt: Date.now(), dirty: true, timer: null, taking: false };
+const FAILURE_BACKOFF_MS = 10000;
+const SNAPSHOT_IDLE_WAIT_MS = 20000;
+const progress = { lastChangeAt: Date.now(), dirty: true, timer: null, taking: false, restoring: false, retryNotBefore: 0 };
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function listFiles(root) {
+async function listFiles(root, { limited }) {
   const found = new Map();
   let totalBytes = 0;
   async function walk(directory) {
@@ -21,7 +24,7 @@ async function listFiles(root) {
       } else if (child.isFile()) {
         const { size } = await fs.stat(absolute);
         totalBytes += size;
-        if (found.size >= LIMITS.snapshotMaxFiles || totalBytes > LIMITS.snapshotMaxBytes) throw new ToolError('snapshot_too_large', 'app/ exceeds the snapshot size limits');
+        if (limited && (found.size >= LIMITS.snapshotMaxFiles || totalBytes > LIMITS.snapshotMaxBytes)) throw new ToolError('snapshot_too_large', 'app/ exceeds the snapshot size limits');
         found.set(path.relative(root, absolute).split(path.sep).join('/'), { absolute, size });
       }
     }
@@ -35,11 +38,18 @@ async function sameContent(leftPath, rightPath) {
   return left.equals(right);
 }
 
+function isSettledAndHealthy() {
+  const settledSince = progress.lastChangeAt + LIMITS.snapshotQuietMs;
+  const hotActivityFollowedChange = status.lastHotActivityAt() >= progress.lastChangeAt;
+  const applied = !hotActivityFollowedChange || status.everyConnectedPageAcknowledgedSince(progress.lastChangeAt);
+  return status.snapshot().status === 'healthy' && status.hasConnectedPage() && applied && status.everyConnectedPageBeatSince(settledSince);
+}
+
 async function takeSnapshot() {
   const startedAt = progress.lastChangeAt;
   let files;
   try {
-    files = await listFiles(APP_DIR);
+    files = await listFiles(APP_DIR, { limited: true });
   } catch (error) {
     if (error instanceof ToolError) return;
     throw error;
@@ -51,7 +61,7 @@ async function takeSnapshot() {
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.copyFile(absolute, target);
   }
-  if (progress.lastChangeAt !== startedAt || status.snapshot().status !== 'healthy') {
+  if (progress.lastChangeAt !== startedAt || progress.restoring || !isSettledAndHealthy()) {
     await fs.rm(GOOD_STAGING_DIR, { recursive: true, force: true });
     return;
   }
@@ -62,23 +72,37 @@ async function takeSnapshot() {
   progress.dirty = false;
 }
 
+async function runSnapshot() {
+  progress.taking = true;
+  try {
+    await takeSnapshot();
+  } catch (error) {
+    progress.retryNotBefore = Date.now() + FAILURE_BACKOFF_MS;
+    status.noteTrace({ event: 'snapshot-failed', message: String(error.message).slice(0, 100) });
+  } finally {
+    progress.taking = false;
+    schedule();
+  }
+}
+
 function schedule() {
   clearTimeout(progress.timer);
   if (!progress.dirty) return;
-  progress.timer = setTimeout(async () => {
+  const delay = Math.max(LIMITS.snapshotQuietMs, progress.retryNotBefore - Date.now());
+  progress.timer = setTimeout(() => {
     const quiet = Date.now() - progress.lastChangeAt >= LIMITS.snapshotQuietMs;
-    if (progress.taking || !quiet || status.snapshot().status !== 'healthy') {
-      if (progress.dirty) schedule();
+    if (progress.taking || progress.restoring || !quiet || !isSettledAndHealthy() || Date.now() < progress.retryNotBefore) {
+      schedule();
       return;
     }
-    progress.taking = true;
-    try {
-      await takeSnapshot();
-    } finally {
-      progress.taking = false;
-    }
-  }, LIMITS.snapshotQuietMs);
+    void runSnapshot();
+  }, delay);
   progress.timer.unref();
+}
+
+async function waitForSnapshotIdle() {
+  const deadline = Date.now() + SNAPSHOT_IDLE_WAIT_MS;
+  while (progress.taking && Date.now() < deadline) await sleep(50);
 }
 
 export function startSnapshotting(server) {
@@ -95,8 +119,19 @@ export function startSnapshotting(server) {
 }
 
 export async function restoreLastGood() {
+  progress.restoring = true;
+  try {
+    await waitForSnapshotIdle();
+    return await restoreFromSnapshot();
+  } finally {
+    progress.restoring = false;
+    schedule();
+  }
+}
+
+async function restoreFromSnapshot() {
   if (!fsSync.existsSync(GOOD_DIR)) throw new ToolError('no_snapshot', 'No healthy state has been recorded yet, so there is nothing to restore.');
-  const [good, current] = await Promise.all([listFiles(GOOD_DIR), listFiles(APP_DIR)]);
+  const [good, current] = await Promise.all([listFiles(GOOD_DIR, { limited: false }), listFiles(APP_DIR, { limited: false })]);
   const touched = [];
   let restored = 0;
   let deleted = 0;

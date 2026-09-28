@@ -48,7 +48,6 @@ const PARSER_LANGUAGE_BY_EXTENSION = {
 
 const ROUTE_FILE_PATTERN = /[\\/]app[\\/](?:.*[\\/])?(?:page|layout|template|loading|error|not-found|global-error)\.[jt]sx?$/;
 const SOURCE_FILE_PATTERN = /\.[cm]?[jt]sx?$/;
-const GOOGLE_FONT_IMPORT_PATTERN = /import\s*\{([^}]*)\}\s*from\s*(['"])next\/font\/google\2;?/g;
 const BARE_TAILWIND_IMPORT_PATTERN = /@import\s+(['"])tailwindcss\1\s*;/g;
 
 function isAppSource(id, pattern) {
@@ -57,20 +56,31 @@ function isAppSource(id, pattern) {
 }
 
 function toDestructuringEntry(specifier) {
-  const renamed = specifier.match(/^(\S+)\s+as\s+(\S+)$/);
-  return renamed ? `${renamed[1]}: ${renamed[2]}` : specifier;
+  const imported = specifier.imported.name ?? specifier.imported.value;
+  return imported === specifier.local.name ? imported : `${imported}: ${specifier.local.name}`;
 }
 
-function rewriteGoogleFontImports(code) {
-  return code.replace(GOOGLE_FONT_IMPORT_PATTERN, (_match, specifierList) => {
-    const entries = specifierList
-      .split(',')
-      .map((specifier) => specifier.trim())
-      .filter((specifier) => specifier && !specifier.startsWith('type '))
+function isGoogleFontImport(statement) {
+  return statement.type === 'ImportDeclaration' && statement.source.value === 'next/font/google';
+}
+
+function rewriteGoogleFontImports(code, id) {
+  let program;
+  try {
+    program = parseAst(code, { lang: PARSER_LANGUAGE_BY_EXTENSION[path.extname(id.split('?')[0])] });
+  } catch {
+    return code;
+  }
+  let rewritten = code;
+  for (const statement of program.body.filter(isGoogleFontImport).reverse()) {
+    const entries = statement.specifiers
+      .filter((specifier) => specifier.type === 'ImportSpecifier' && specifier.importKind !== 'type')
       .map(toDestructuringEntry);
     const destructuring = entries.length ? ` const { ${entries.join(', ')} } = __nextGoogleFonts;` : '';
-    return `import { fonts as __nextGoogleFonts } from 'next/font/google';${destructuring}`;
-  });
+    const replacement = `import { fonts as __nextGoogleFonts } from 'next/font/google';${destructuring}`;
+    rewritten = rewritten.slice(0, statement.start) + replacement + rewritten.slice(statement.end);
+  }
+  return rewritten;
 }
 
 function declaredNames(statement) {
@@ -158,7 +168,7 @@ function nextShimsPlugin() {
     transform(code, id) {
       if (!isAppSource(id, SOURCE_FILE_PATTERN)) return null;
       let transformed = code;
-      if (transformed.includes('next/font/google')) transformed = rewriteGoogleFontImports(transformed);
+      if (transformed.includes('next/font/google')) transformed = rewriteGoogleFontImports(transformed, id);
       if (ROUTE_FILE_PATTERN.test(id.split('?')[0])) {
         transformed = stripNextRouteSegmentExports(transformed, id) ?? transformed;
       }

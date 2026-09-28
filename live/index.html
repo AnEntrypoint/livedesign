@@ -6,6 +6,7 @@
   <title>Gemini Live HMR</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="./style.css">
+  <style>.status[data-state='failed'] { color: var(--bad); border-color: var(--bad); }</style>
 </head>
 <body>
   <header class="bar">
@@ -22,7 +23,7 @@
       <button id="restore" type="button">Restore last good</button>
       <button id="rebuild" type="button">Rebuild frame</button>
       <button id="stop" type="button" disabled>Stop</button>
-      <a href="/app/" target="_blank" rel="noopener">Open app in its own tab</a>
+      <a id="open-app" href="/app/" target="_blank" rel="noopener">Open app in its own tab</a>
     </div>
   </header>
   <main class="stage">

@@ -1,10 +1,13 @@
 import { LiveSession } from './session.js';
-import { createNoticeEngine } from './notices.js';
+import { createEpisode, createNoticeEngine } from './notices.js';
 import { createPlayback, startMicrophone, startScreenShare } from './media.js';
 
 const LOG_LIMIT = 200;
 const FRAME_REBUILD_DELAY_MS = 50;
 const AUTO_REBUILD_AFTER_MS = 3000;
+const AUTO_REBUILD_LIMIT = 3;
+const EVENTS_RETRY_BASE_MS = 1000;
+const EVENTS_RETRY_CAP_MS = 15000;
 const IDS = ['status', 'app-status', 'start', 'share', 'mute', 'refresh', 'pause', 'restore', 'rebuild', 'stop', 'log', 'say', 'say-text', 'say-send', 'frame'];
 const elements = Object.fromEntries(IDS.map((id) => [id, document.getElementById(id)]));
 
@@ -23,11 +26,13 @@ const runtime = {
   events: [],
   appSnapshot: null,
   autoRebuildTimer: null,
-  autoRebuilt: false,
+  eventsRetryMs: EVENTS_RETRY_BASE_MS,
+  epoch: 0,
 };
 
 const alternateHost = { localhost: '127.0.0.1', '127.0.0.1': 'localhost' }[location.hostname];
 const appOrigin = alternateHost ? `${location.protocol}//${alternateHost}:${location.port}` : location.origin;
+document.getElementById('open-app').href = `${appOrigin}/app/`;
 
 function logLine(kind, text) {
   const item = document.createElement('li');
@@ -65,7 +70,7 @@ function applyState(state) {
     notices.retry();
     announceVision();
   }
-  if (state === 'closed' || state === 'error') releaseMedia();
+  if (state === 'closed' || state === 'failed') releaseMedia();
 }
 
 const live = new LiveSession({
@@ -103,7 +108,10 @@ function announceVision() {
   }
 }
 
+const episode = createEpisode();
+
 const notices = createNoticeEngine({
+  episode,
   send: (text) => {
     try {
       live.sendText(text);
@@ -116,6 +124,8 @@ const notices = createNoticeEngine({
 });
 
 function releaseMedia() {
+  runtime.epoch += 1;
+  runtime.sharePending = false;
   runtime.screen?.stop();
   runtime.screen = null;
   runtime.microphone?.stop();
@@ -142,43 +152,62 @@ function summarizeToolResult(result) {
 }
 
 async function start() {
+  runtime.epoch += 1;
+  const epoch = runtime.epoch;
+  const aborted = () => runtime.epoch !== epoch;
   live.setState('connecting');
-  const sharing = share();
-  runtime.playback = createPlayback();
-  await runtime.playback.resume();
   try {
-    runtime.microphone = await startMicrophone({ onChunk: (base64) => live.sendAudio(base64) });
+    const sharing = share();
+    const playback = createPlayback();
+    runtime.playback = playback;
+    await playback.resume();
+    if (aborted()) return;
+    let microphone = null;
+    try {
+      microphone = await startMicrophone({ onChunk: (base64) => live.sendAudio(base64) });
+    } catch (error) {
+      logLine('error', `microphone unavailable: ${error.message}; text input still works`);
+    }
+    if (aborted()) {
+      microphone?.stop();
+      return;
+    }
+    runtime.microphone = microphone;
+    await live.start();
+    await sharing;
   } catch (error) {
-    logLine('error', `microphone unavailable: ${error.message}; text input still works`);
+    if (aborted()) return;
+    logLine('error', `start failed: ${error.message}`);
+    live.stop();
+    live.setState('idle');
   }
-  await live.start();
-  await sharing;
-}
-
-function abortStart(error) {
-  logLine('error', `start failed: ${error.message}`);
-  releaseMedia();
-  live.setState('idle');
 }
 
 async function share() {
+  const epoch = runtime.epoch;
   runtime.sharePending = true;
   try {
-    runtime.screen = await startScreenShare({
+    const screen = await startScreenShare({
       onFrame: (base64) => live.sendFrame(base64),
       onEnded: () => {
+        if (runtime.epoch !== epoch) return;
         runtime.screen = null;
         applyState(live.state);
         logLine('note', 'screen share ended');
         announceVision();
       },
     });
+    if (runtime.epoch !== epoch) {
+      screen.stop();
+      return;
+    }
+    runtime.screen = screen;
     logLine('note', 'sharing this tab');
   } catch (error) {
+    if (runtime.epoch !== epoch) return;
     logLine('error', `screen share unavailable: ${error.message}; Gemini cannot see the app`);
-  } finally {
-    runtime.sharePending = false;
   }
+  runtime.sharePending = false;
   applyState(live.state);
   announceVision();
 }
@@ -222,17 +251,22 @@ function sendText(event) {
 
 function watchForHungFrame(snapshot) {
   const frameHung = snapshot.pages.some((page) => page.frameName === elements.frame.name && !page.responsive);
+  episode.observe({ hung: frameHung || snapshot.status === 'unresponsive', healthy: snapshot.status === 'healthy' });
   if (!frameHung) {
     clearTimeout(runtime.autoRebuildTimer);
     runtime.autoRebuildTimer = null;
-    runtime.autoRebuilt = false;
     return;
   }
-  if (runtime.autoRebuilt || runtime.autoRebuildTimer !== null) return;
+  if (runtime.autoRebuildTimer !== null) return;
+  if (episode.used('rebuild') >= AUTO_REBUILD_LIMIT) {
+    if (episode.claim('rebuild-cap-logged')) {
+      logLine('error', `the app frame hung again after ${AUTO_REBUILD_LIMIT} automatic rebuilds; not rebuilding automatically, fix the loop or press Rebuild frame`);
+    }
+    return;
+  }
   runtime.autoRebuildTimer = setTimeout(() => {
     runtime.autoRebuildTimer = null;
-    runtime.autoRebuilt = true;
-    rebuildFrame();
+    if (episode.claim('rebuild', AUTO_REBUILD_LIMIT)) rebuildFrame();
   }, AUTO_REBUILD_AFTER_MS);
 }
 
@@ -251,15 +285,23 @@ function applyAppStatus(snapshot) {
   notices.update(snapshot);
 }
 
-const events = new EventSource('/api/events');
-events.addEventListener('status', (event) => applyAppStatus(JSON.parse(event.data)));
-events.addEventListener('rebuild', rebuildFrame);
-events.addEventListener('error', () => {
-  elements['app-status'].dataset.state = 'error';
-  elements['app-status'].textContent = 'app: status offline';
-});
+function openEvents() {
+  const source = new EventSource('/api/events');
+  source.addEventListener('status', (event) => {
+    runtime.eventsRetryMs = EVENTS_RETRY_BASE_MS;
+    applyAppStatus(JSON.parse(event.data));
+  });
+  source.addEventListener('rebuild', rebuildFrame);
+  source.addEventListener('error', () => {
+    elements['app-status'].dataset.state = 'error';
+    elements['app-status'].textContent = 'app: status offline';
+    if (source.readyState !== EventSource.CLOSED) return;
+    setTimeout(openEvents, runtime.eventsRetryMs);
+    runtime.eventsRetryMs = Math.min(EVENTS_RETRY_CAP_MS, runtime.eventsRetryMs * 2);
+  });
+}
 
-elements.start.addEventListener('click', () => start().catch(abortStart));
+elements.start.addEventListener('click', start);
 elements.stop.addEventListener('click', () => live.stop());
 elements.share.addEventListener('click', share);
 elements.mute.addEventListener('click', toggleMute);
@@ -282,4 +324,5 @@ window.__debug = {
 };
 
 applyState('idle');
+openEvents();
 loadFrame();

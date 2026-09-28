@@ -3,8 +3,9 @@ import path from 'node:path';
 import { APP_DIR, LIMITS } from './config.js';
 import { ToolError } from './errors.js';
 
-const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-const FORBIDDEN_CHARS = /[<>:"|?*\u0000-\u001f]/;
+const RESERVED_NAME = /^(con|prn|aux|nul|conin\$|conout\$|clock\$|com[0-9]|lpt[0-9])[ .]*(\..*)?$/i;
+const FORBIDDEN_CHARS = /[<>:"|?*\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}]/u;
+const DEPENDENCY_DIRECTORY = 'node_modules';
 const ROOTED = /^([\\/]|[a-zA-Z]:)/;
 
 function isStrictlyInside(root, candidate) {
@@ -26,10 +27,11 @@ function realpathOfDeepestAncestor(target) {
   }
 }
 
-function segmentsOf(relativePath) {
-  if (typeof relativePath !== 'string' || relativePath.length === 0 || relativePath.length > LIMITS.maxPathChars) {
+function segmentsOf(givenPath) {
+  if (typeof givenPath !== 'string' || givenPath.length === 0 || givenPath.length > LIMITS.maxPathChars) {
     throw new ToolError('invalid_path', 'path must be a non-empty string of at most 200 characters');
   }
+  const relativePath = givenPath.normalize('NFKC');
   if (FORBIDDEN_CHARS.test(relativePath)) {
     throw new ToolError('invalid_path', 'path contains a forbidden character');
   }
@@ -43,6 +45,9 @@ function segmentsOf(relativePath) {
     }
     if (/[. ]$/.test(segment) || segment.includes('~') || RESERVED_NAME.test(segment)) {
       throw new ToolError('invalid_path', `path segment "${segment}" is not allowed on Windows`);
+    }
+    if (segment.toLowerCase() === DEPENDENCY_DIRECTORY) {
+      throw new ToolError('invalid_path', 'node_modules cannot be written; packages are installed with install_packages');
     }
   }
   return segments;
