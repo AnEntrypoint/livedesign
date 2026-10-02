@@ -351,7 +351,7 @@ export function setScreen(report) {
 
 export function screenSummary() {
   if (!screen.known) return null;
-  if (screen.sharing) return { sharing: true };
+  if (screen.sharing) return { sharing: true, note: 'The screen is shared with you as a live view. Validate visually against what you are watching and never claim a result you have not actually seen.' };
   return { sharing: false, note: 'The user is not sharing their screen, so you cannot see the app. Do not claim any visual result; rely on status and errors and ask the user to click Share this tab.' };
 }
 

@@ -3,9 +3,9 @@ import { resolve } from 'node:path';
 import { hmrLivePlugin } from './server/plugin.js';
 import { v0Compat } from './server/v0-compat.js';
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   appType: 'mpa',
-  publicDir: resolve('app/public'),
+  publicDir: command === 'build' ? resolve('app/public') : false,
   plugins: [hmrLivePlugin(), ...v0Compat()],
   server: {
     watch: {
@@ -21,4 +21,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

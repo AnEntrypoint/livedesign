@@ -1,15 +1,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import postcss from 'postcss';
+import { canonicalFileOf, isAppRootOrInside, isUnderApp, isUnderRootModules } from './appPaths.js';
 import { APP_DIR, PROJECT_ROOT } from './config.js';
 
 const ROOT_MODULES = path.join(PROJECT_ROOT, 'node_modules');
 const ESCAPED_AT_RULE = /@\\/;
-const CODE_LOADING_AT_RULE = /@(?:plugin|config)\b/i;
-const IMPORT_TARGET = /@(?:import|reference)\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s"')(;]+))/gi;
-const SOURCE_TARGET = /(?:@source\s+(?:not\s+)?|\bsource\(\s*)(?:"([^"]*)"|'([^']*)')/gi;
+const CODE_LOADING_AT_RULE = /@\s*(?:plugin|config)/i;
+const COMMENT = /\/\*[\s\S]*?(?:\*\/|$)/g;
+const IMPORT_PARAMS = /^\s*(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s"')(;]+))/i;
+const SOURCE_FUNCTION = /\bsource\(\s*(?:"([^"]*)"|'([^']*)')/gi;
+const SOURCE_PARAMS = /^\s*(?:not\s+)?(?:"([^"]*)"|'([^']*)')/i;
+const ALLOWED_AT_RULES = new Set([
+  'import', 'reference', 'source', 'theme', 'apply', 'layer', 'custom-variant', 'variant', 'utility', 'tailwind', 'screen',
+  'media', 'supports', 'container', 'keyframes', 'font-face', 'property', 'starting-style', 'scope', 'page', 'namespace', 'charset',
+  'font-feature-values', 'counter-style', 'view-transition', 'position-try', 'font-palette-values', 'color-profile', 'custom-media',
+]);
 const REMOTE_URL = /^https?:\/\//i;
 const NON_RELATIVE_SCHEME = /^(?:[a-z][a-z0-9+.-]*:|[\\/]|~)/i;
 const ALLOWED_STYLE_PACKAGES = /^(?:tailwindcss|tw-animate-css|shadcn|@tailwindcss\/[\w.-]+|@fontsource(?:-variable)?\/[\w.-]+|normalize\.css|modern-normalize)(?:\/(?!\.\.?(?:\/|$))[\w.-]+)*$/;
+const STYLESHEET_ID = /\.css(?:$|\?)|[?&]lang\.css|[?&]index=\d+\.css$/i;
 const MAX_STYLESHEETS = 24;
 const MAX_STYLESHEET_BYTES = 2 * 1024 * 1024;
 
@@ -18,17 +28,15 @@ class CssPolicyViolation extends Error {}
 const keyOf = (file) => (process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file));
 
 function isInsideApp(candidate) {
-  const relative = path.relative(APP_DIR, candidate);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return isUnderApp(canonicalFileOf(candidate) ?? candidate);
 }
 
 function isInsideRootModules(candidate) {
-  const relative = path.relative(ROOT_MODULES, candidate);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return isUnderRootModules(canonicalFileOf(candidate) ?? candidate);
 }
 
-function targetsOf(pattern, source) {
-  return [...source.matchAll(pattern)].map((match) => match[1] ?? match[2] ?? match[3]);
+function isAppRoot(candidate) {
+  return isAppRootOrInside(canonicalFileOf(candidate) ?? candidate);
 }
 
 function packageNameOf(specifier) {
@@ -55,9 +63,9 @@ function readStylesheet(file, planned) {
 function shadowingDirectory(packageName, stylesheetDir) {
   let directory = stylesheetDir;
   for (;;) {
-    if (!isInsideApp(directory) && directory !== APP_DIR) return null;
+    if (!isAppRoot(directory)) return null;
     if (fs.existsSync(path.join(directory, 'node_modules', ...packageName.split('/')))) return directory;
-    if (directory === APP_DIR) return null;
+    if (!isInsideApp(directory)) return null;
     directory = path.dirname(directory);
   }
 }
@@ -105,19 +113,48 @@ function checkImportTarget(target, stylesheetDir, planned, pending) {
 
 function checkSourceTarget(target, stylesheetDir) {
   if (target === 'none' || target === '') return;
-  if (NON_RELATIVE_SCHEME.test(target) || !isInsideApp(path.resolve(stylesheetDir, target)) && path.resolve(stylesheetDir, target) !== APP_DIR) {
+  if (NON_RELATIVE_SCHEME.test(target) || !isAppRoot(path.resolve(stylesheetDir, target))) {
     throw new CssPolicyViolation(`source "${target}" must stay inside app/`);
+  }
+}
+
+function targetsOfSourceFunction(params) {
+  return [...params.matchAll(SOURCE_FUNCTION)].map((match) => match[1] ?? match[2]);
+}
+
+function checkAtRule(node, stylesheetDir, planned, pending) {
+  const name = node.name.toLowerCase().replace(/^-[a-z]+-/, '');
+  if (!ALLOWED_AT_RULES.has(name)) throw new CssPolicyViolation(`@${node.name || '(unnamed)'} is not an at-rule this app allows`);
+  if (name === 'import' || name === 'reference') {
+    const match = IMPORT_PARAMS.exec(node.params);
+    if (match === null) throw new CssPolicyViolation(`@${name} has no readable target`);
+    checkImportTarget(match[1] ?? match[2] ?? match[3], stylesheetDir, planned, pending);
+  }
+  if (name === 'source') {
+    const match = SOURCE_PARAMS.exec(node.params);
+    if (match !== null) checkSourceTarget(match[1] ?? match[2], stylesheetDir);
+    else if (!/^\s*(?:not\s+)?inline\(/i.test(node.params)) throw new CssPolicyViolation('@source needs a quoted path or inline(...)');
+  }
+  for (const target of targetsOfSourceFunction(node.params)) checkSourceTarget(target, stylesheetDir);
+}
+
+function parseStylesheet(source) {
+  try {
+    return postcss.parse(source);
+  } catch (error) {
+    throw new CssPolicyViolation(`stylesheet cannot be parsed (${String(error.reason ?? error.message).slice(0, 80)})`);
   }
 }
 
 function checkStylesheet(source, { file, trusted }, planned, pending) {
   if (ESCAPED_AT_RULE.test(source)) throw new CssPolicyViolation('escaped at-rule names are not allowed');
-  const forbidden = CODE_LOADING_AT_RULE.exec(source);
-  if (forbidden) throw new CssPolicyViolation(`${forbidden[0]} would run code inside the dev server and is not allowed`);
+  for (const visible of [source.replace(COMMENT, ''), source.replace(COMMENT, ' ')]) {
+    const forbidden = CODE_LOADING_AT_RULE.exec(visible);
+    if (forbidden) throw new CssPolicyViolation(`${forbidden[0]} would run code inside the dev server and is not allowed`);
+  }
   if (trusted) return;
   const stylesheetDir = path.dirname(file);
-  for (const target of targetsOf(IMPORT_TARGET, source)) checkImportTarget(target, stylesheetDir, planned, pending);
-  for (const target of targetsOf(SOURCE_TARGET, source)) checkSourceTarget(target, stylesheetDir);
+  parseStylesheet(source).walkAtRules((node) => checkAtRule(node, stylesheetDir, planned, pending));
 }
 
 export function assertStylesheetAllowed(source, filePath, plannedFiles = []) {
@@ -150,8 +187,9 @@ export function stylesheetPolicyPlugin() {
     name: 'hmr-live-stylesheet-policy',
     enforce: 'pre',
     transform(code, id) {
-      const filePath = path.normalize(id.split('?')[0]);
-      if (!filePath.startsWith(APP_DIR + path.sep) || !/\.css(?:$|\?)/i.test(id)) return null;
+      if (!STYLESHEET_ID.test(id)) return null;
+      const filePath = canonicalFileOf(id);
+      if (filePath === null || isUnderRootModules(filePath)) return null;
       try {
         assertStylesheetAllowed(code, filePath);
       } catch (error) {

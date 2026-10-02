@@ -4,18 +4,19 @@ import path from 'node:path';
 import { APP_DIR, LIMITS, WRITABLE_EXTENSIONS } from './config.js';
 import { ToolError } from './errors.js';
 import { sandboxed } from './paths.js';
-import { assertNotProtected, writeAppFile } from './appWrite.js';
+import { assertNotProtected, withFileLock, writeAppFile } from './appWrite.js';
 import { beginChange, beginRecovery } from './guard.js';
 import { describeCurrentStatus, settleChange, settleReload } from './settle.js';
 import { restoreLastGood } from './snapshot.js';
 import { installPackages } from './packages.js';
 import { v0Declarations, v0Handlers } from './v0Tools.js';
+import { neutraliseBlock, neutraliseLine } from '../live/untrusted.js';
 import * as appLog from './appLog.js';
 import * as status from './status.js';
 import { recordToolCall } from './toolLog.js';
 
 const pathProperty = { type: Type.STRING, description: 'Path relative to app/, using forward slashes, for example "app/page.tsx" or "components/card.tsx".' };
-const OUTCOME_NOTE = ' The result reports the real outcome: hmr, status, and errors with file, line and code frame. Only call the change working when status is healthy.';
+const OUTCOME_NOTE = ' The result reports the real outcome: hmr, status, and errors with file, line and code frame. Only call the change working when healthy is true; unverified means no visible app page acknowledged it.';
 
 const localDeclarations = [
   {
@@ -148,8 +149,10 @@ const handlers = {
     assertNotProtected(relative);
     requireWritableExtension(absolute);
     const content = requireString(args, 'content');
-    const change = beginChange();
-    const bytes = await writeAppFile({ absolute, relative }, content);
+    const { change, bytes } = await withFileLock(relative, async () => {
+      const started = beginChange();
+      return { change: started, bytes: await writeAppFile({ absolute, relative }, content) };
+    });
     return { ok: true, path: relative, bytes, ...await settleChange(context.server, { changedPaths: [relative], ...change }) };
   },
 
@@ -160,22 +163,27 @@ const handlers = {
     const oldString = requireString(args, 'old_string');
     const newString = requireString(args, 'new_string');
     if (oldString.length === 0) throw new ToolError('invalid_argument', 'old_string must not be empty');
-    await statFile(absolute);
-    const original = await fs.readFile(absolute, 'utf8');
-    const occurrences = original.split(oldString).length - 1;
-    if (occurrences === 0) throw new ToolError('old_string_not_found', 'old_string does not occur in the file');
-    if (occurrences > 1) throw new ToolError('old_string_not_unique', `old_string occurs ${occurrences} times; include more context`);
-    const change = beginChange();
-    const bytes = await writeAppFile({ absolute, relative }, original.replace(oldString, () => newString));
+    const { change, bytes } = await withFileLock(relative, async () => {
+      await statFile(absolute);
+      const original = await fs.readFile(absolute, 'utf8');
+      const occurrences = original.split(oldString).length - 1;
+      if (occurrences === 0) throw new ToolError('old_string_not_found', 'old_string does not occur in the file');
+      if (occurrences > 1) throw new ToolError('old_string_not_unique', `old_string occurs ${occurrences} times; include more context`);
+      const started = beginChange();
+      return { change: started, bytes: await writeAppFile({ absolute, relative }, original.replace(oldString, () => newString)) };
+    });
     return { ok: true, path: relative, bytes, ...await settleChange(context.server, { changedPaths: [relative], ...change }) };
   },
 
   async delete_file(args, context) {
     const { absolute, relative } = sandboxed(args.path);
     assertNotProtected(relative);
-    await statFile(absolute);
-    const change = beginChange();
-    await fs.unlink(absolute);
+    const change = await withFileLock(relative, async () => {
+      await statFile(absolute);
+      const started = beginChange();
+      await fs.unlink(absolute);
+      return started;
+    });
     return { ok: true, path: relative, ...await settleChange(context.server, { changedPaths: [relative], ...change }) };
   },
 
@@ -186,7 +194,12 @@ const handlers = {
   async read_app_log(args) {
     const limit = Number.isInteger(args.limit) ? Math.min(Math.max(args.limit, 1), LIMITS.appLogEntries) : 50;
     const sinceSeq = Number.isInteger(args.since_seq) ? args.since_seq : 0;
-    return { ok: true, ...describeCurrentStatus(), latestSeq: appLog.currentSequence(), entries: appLog.read({ limit, sinceSeq }) };
+    const entries = appLog.read({ limit, sinceSeq }).map((entry) => ({
+      ...entry,
+      text: neutraliseBlock(entry.text, LIMITS.appLogTextChars),
+      url: neutraliseLine(entry.url, 200),
+    }));
+    return { ok: true, ...describeCurrentStatus(), latestSeq: appLog.currentSequence(), ...(entries.length > 0 && { untrustedEntryText: true }), entries };
   },
 
   async install_packages(args, context) {

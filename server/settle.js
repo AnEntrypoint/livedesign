@@ -1,5 +1,7 @@
+import { normalizePath } from 'vite';
+import { neutraliseBlock, neutraliseLine } from '../live/untrusted.js';
 import { APP_RELOAD_PATH, LIMITS } from './config.js';
-import { checkFile } from './diagnostics.js';
+import { absoluteOf, checkFile } from './diagnostics.js';
 import { installMissingFromErrors, registerResolvable } from './packages.js';
 import * as status from './status.js';
 
@@ -53,19 +55,55 @@ async function waitForHotActivity(since) {
   return status.lastHotActivityAt() > since;
 }
 
+const CLIENT_SOURCE = /^app\/.+\.(tsx?|jsx?|mjs|css|html)$/i;
+const NO_VISIBLE_PAGE_NOTE = 'No visible app page is connected (the tab is hidden or closed), so the runtime state is not being observed.';
+const UNACKNOWLEDGED_OUTCOMES = new Set(['no_page', 'none', 'timeout']);
+const UNVERIFIED_NOTE = 'Build checks passed but no visible app page acknowledged the change, so runtime behaviour is unverified (healthy is false). Do not claim the change works; tell the user, or ask them to bring the app tab to the front.';
+
+function isUnverified(current, outcome) {
+  if (current.status !== 'healthy') return false;
+  return Boolean(outcome.unacknowledged) || UNACKNOWLEDGED_OUTCOMES.has(outcome.hmr);
+}
+
+function reachesClient(server, relative) {
+  if (CLIENT_SOURCE.test(relative)) return true;
+  const graph = server.environments.client.moduleGraph;
+  const absolute = normalizePath(absoluteOf(relative));
+  if ((graph.getModulesByFile(absolute)?.size ?? 0) > 0) return true;
+  const lowered = absolute.toLowerCase();
+  return [...graph.fileToModulesMap.keys()].some((file) => file.toLowerCase() === lowered);
+}
+
+function untrustedError({ kind, file, line, column, message, frame, count }) {
+  return {
+    kind,
+    file: file === null ? null : neutraliseLine(file, 200),
+    line,
+    column,
+    message: neutraliseLine(message, LIMITS.appLogTextChars),
+    frame: frame === null || frame === undefined ? frame : neutraliseBlock(frame, LIMITS.errorFrameChars),
+    ...(count > 1 && { count }),
+  };
+}
+
 function describe(outcome) {
   const current = status.snapshot();
   const shown = current.errors.slice(0, LIMITS.maxErrorsInResult);
   status.markReported(shown.map((error) => error.id));
+  const unverified = isUnverified(current, outcome);
   return {
     ...(outcome.hmr && { hmr: outcome.hmr }),
     status: current.status,
-    healthy: current.status === 'healthy',
+    healthy: current.status === 'healthy' && !unverified,
+    ...(unverified && { unverified: true }),
     ...(outcome.recovered && { recovered: true, recoveredBy: outcome.recoveredBy }),
     ...(outcome.packages && (outcome.packages.installed.length > 0 || outcome.packages.rejected.length > 0 || outcome.packages.resolvedWithoutRestart?.length > 0) && { packages: outcome.packages }),
     errorCount: current.errors.length,
-    errors: shown.map(({ kind, file, line, column, message, frame, count }) => ({ kind, file, line, column, message, frame, ...(count > 1 && { count }) })),
+    ...(shown.length > 0 && { untrustedErrorText: true }),
+    errors: shown.map(untrustedError),
     ...(current.status === 'no_page' && { note: 'No app page is connected, so runtime behaviour was not verified. Build checks ran.' }),
+    ...(unverified && { note: UNVERIFIED_NOTE }),
+    ...(outcome.hmr === undefined && current.status === 'healthy' && status.expectedPages().length === 0 && { note: NO_VISIBLE_PAGE_NOTE }),
     ...(current.status === 'unresponsive' && { note: 'An app page stopped responding; it may be stuck in an infinite loop. Fix the code and it will recover.' }),
   };
 }
@@ -74,9 +112,10 @@ async function forceReload(server) {
   const startedAt = Date.now();
   const targets = status.expectedPages();
   requestScopedReload(server);
-  if (targets.length === 0) return;
-  await status.waitForAcknowledgements(startedAt, targets, LIMITS.reloadWaitMs);
+  if (targets.length === 0) return false;
+  const acknowledgements = await status.waitForAcknowledgements(startedAt, targets, LIMITS.reloadWaitMs);
   await sleep(LIMITS.reloadGraceMs);
+  return acknowledgements.all;
 }
 
 async function recoverUnresponsive(finish) {
@@ -101,12 +140,13 @@ async function repairUnresolvedImports(server, changedPaths) {
   return [...everRegistered];
 }
 
-export async function settleChange(server, { changedPaths, startedAt, wasBroken }) {
+async function settleNow(server, { changedPaths, startedAt, wasBroken }) {
   await diagnose(server, changedPaths);
   const installation = await installMissingFromErrors(status.snapshot().errors);
   const registered = await repairUnresolvedImports(server, changedPaths);
   const packages = installation || registered.length > 0 ? { installed: [], rejected: [], ...installation, resolvedWithoutRestart: registered } : null;
   const finish = (outcome) => describe({ ...outcome, packages });
+  if (!changedPaths.some((relative) => reachesClient(server, relative))) return finish({ hmr: 'not_in_module_graph' });
   const targets = status.expectedPages();
   if (targets.length === 0) return finish({ hmr: 'no_page' });
   if (status.snapshot().status === 'unresponsive' && !status.hasBuildErrors()) return recoverUnresponsive(finish);
@@ -120,9 +160,10 @@ export async function settleChange(server, { changedPaths, startedAt, wasBroken 
   const outcome = { hmr: acknowledgements.all ? (acknowledgements.reloaded ? 'full-reload' : 'hot-update') : 'timeout' };
   const stuck = !acknowledgements.all || status.hasRuntimeErrorKind('hmr-failed') || status.hasRuntimeErrorKind('blank');
   if (stuck && !status.hasBuildErrors()) {
-    await forceReload(server);
+    const acknowledged = await forceReload(server);
     outcome.hmr = 'forced-full-reload';
-    outcome.recovered = wasBroken && status.snapshot().status === 'healthy';
+    outcome.unacknowledged = !acknowledged;
+    outcome.recovered = acknowledged && wasBroken && status.snapshot().status === 'healthy';
     outcome.recoveredBy = 'forced-full-reload';
   } else if (wasBroken && status.snapshot().status === 'healthy') {
     outcome.recovered = true;
@@ -131,7 +172,7 @@ export async function settleChange(server, { changedPaths, startedAt, wasBroken 
   return finish(outcome);
 }
 
-export async function settleReload(server) {
+async function reloadNow(server) {
   await diagnose(server, []);
   await repairUnresolvedImports(server, []);
   const startedAt = Date.now();
@@ -141,6 +182,22 @@ export async function settleReload(server) {
   const acknowledgements = await status.waitForAcknowledgements(startedAt, targets, LIMITS.reloadWaitMs);
   await sleep(LIMITS.reloadGraceMs);
   return describe({ hmr: acknowledgements.all ? 'full-reload' : 'timeout' });
+}
+
+let settleQueue = Promise.resolve();
+
+function inSettleOrder(work) {
+  const run = settleQueue.then(work);
+  settleQueue = run.catch(() => {});
+  return run;
+}
+
+export function settleChange(server, change) {
+  return inSettleOrder(() => settleNow(server, change));
+}
+
+export function settleReload(server) {
+  return inSettleOrder(() => reloadNow(server));
 }
 
 export function describeCurrentStatus() {

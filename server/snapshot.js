@@ -5,6 +5,7 @@ import { APP_DIR, GOOD_DIR, GOOD_STAGING_DIR, LIMITS } from './config.js';
 import { ToolError } from './errors.js';
 import { absoluteOf, relativeOf } from './diagnostics.js';
 import { writeAtomically } from './atomicWrite.js';
+import { withFileLock } from './appWrite.js';
 import * as status from './status.js';
 
 const GOOD_PREVIOUS_DIR = `${GOOD_DIR}.previous`;
@@ -33,9 +34,35 @@ async function listFiles(root, { limited }) {
   return found;
 }
 
-async function sameContent(leftPath, rightPath) {
-  const [left, right] = await Promise.all([fs.readFile(leftPath), fs.readFile(rightPath)]);
-  return left.equals(right);
+async function readIfPresent(absolute) {
+  try {
+    return await fs.readFile(absolute);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function restoreFile(relative, sourcePath) {
+  return withFileLock(relative, async () => {
+    const wanted = await fs.readFile(sourcePath);
+    const present = await readIfPresent(absoluteOf(relative));
+    if (present !== null && present.equals(wanted)) return false;
+    await writeAtomically(absoluteOf(relative), wanted);
+    return true;
+  });
+}
+
+async function removeFile(relative) {
+  return withFileLock(relative, async () => {
+    try {
+      await fs.unlink(absoluteOf(relative));
+      return true;
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+  });
 }
 
 function isSettledAndHealthy() {
@@ -136,15 +163,13 @@ async function restoreFromSnapshot() {
   let restored = 0;
   let deleted = 0;
   for (const [relative, source] of good) {
-    const existing = current.get(relative);
-    if (existing && await sameContent(existing.absolute, source.absolute)) continue;
-    await writeAtomically(absoluteOf(relative), await fs.readFile(source.absolute));
+    if (!await restoreFile(relative, source.absolute)) continue;
     touched.push(relative);
     restored += 1;
   }
-  for (const [relative, existing] of current) {
+  for (const relative of current.keys()) {
     if (good.has(relative)) continue;
-    await fs.unlink(existing.absolute);
+    if (!await removeFile(relative)) continue;
     touched.push(relative);
     deleted += 1;
   }

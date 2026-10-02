@@ -37,6 +37,7 @@ export class LiveSession {
     this.answeredCallIds = new Set();
     this.cancelledCallIds = new Set();
     this.inflightCalls = new Map();
+    this.finishedCalls = new Map();
     this.unsentResponses = new Map();
     this.flushing = Promise.resolve();
     this.stats = { audioChunksSent: 0, framesSent: 0, toolCalls: 0, reconnects: 0 };
@@ -192,9 +193,14 @@ export class LiveSession {
   }
 
   executeOnce(call) {
+    const finished = this.finishedCalls.get(call.id);
+    if (finished) return Promise.resolve(finished);
     const running = this.inflightCalls.get(call.id);
     if (running) return running;
-    const execution = this.execute(call).finally(() => this.inflightCalls.delete(call.id));
+    const execution = this.execute(call).then((response) => {
+      this.finishedCalls.set(call.id, response);
+      return response;
+    }).finally(() => this.inflightCalls.delete(call.id));
     this.inflightCalls.set(call.id, execution);
     return execution;
   }
@@ -217,7 +223,12 @@ export class LiveSession {
   async answerToolCalls(calls) {
     const conversation = this.conversation;
     const pending = calls.filter((call) => !this.isSettled(call.id));
-    const responses = await Promise.all(pending.map((call) => this.executeOnce(call)));
+    const responses = [];
+    for (const call of pending) {
+      if (conversation !== this.conversation) return;
+      if (this.cancelledCallIds.has(call.id)) continue;
+      responses.push(await this.executeOnce(call));
+    }
     if (conversation !== this.conversation) return;
     for (const response of responses) {
       if (!this.isSettled(response.id)) this.unsentResponses.set(response.id, response);
@@ -231,7 +242,10 @@ export class LiveSession {
   }
 
   async flushOnce() {
-    for (const id of this.cancelledCallIds) this.unsentResponses.delete(id);
+    for (const id of this.cancelledCallIds) {
+      this.unsentResponses.delete(id);
+      this.finishedCalls.delete(id);
+    }
     const batch = [...this.unsentResponses.values()];
     if (batch.length === 0 || !this.session) return;
     let outgoing = batch;
@@ -253,6 +267,7 @@ export class LiveSession {
     }
     for (const entry of deliverable) {
       this.unsentResponses.delete(entry.id);
+      this.finishedCalls.delete(entry.id);
       this.answeredCallIds.add(entry.id);
     }
   }
@@ -286,6 +301,7 @@ export class LiveSession {
     this.conversation += 1;
     this.invalidate();
     this.unsentResponses.clear();
+    this.finishedCalls.clear();
     const session = this.session;
     this.session = null;
     session?.close();

@@ -12,8 +12,9 @@ const RESPAWN_DELAY_MS = 100;
 const PING_INTERVAL_MS = 5000;
 const RETIRE_GRACE_MS = 2000;
 const REGISTRY_KEY = Symbol.for('hmr-live.parse-worker-registry');
-const TOO_LARGE = { crashed: true, reason: 'too_large' };
-const SHUTTING_DOWN = { crashed: true, reason: 'shutting_down' };
+const CANARY_SOURCE = 'export default 1;';
+const TOO_LARGE = { crashed: true, transient: false, reason: 'too_large' };
+const SHUTTING_DOWN = { crashed: true, transient: true, reason: 'shutting_down' };
 
 function createLane(timeoutMs) {
   return { worker: null, queue: Promise.resolve(), timeoutMs };
@@ -72,12 +73,13 @@ function startWorker(lane) {
   child.on('exit', (code) => {
     registry.children.delete(child);
     if (lane.worker === child) lane.worker = null;
-    if (code !== 0 && !child.retired && isCurrentInstance() && !isStopping()) respawnLater(lane);
+    if (code !== 0 && child.wasReady && !child.retired && isCurrentInstance() && !isStopping()) respawnLater(lane);
   });
   child.ready = new Promise((resolve) => {
     const onReady = (message) => {
       if (message?.ready !== true) return;
       child.off('message', onReady);
+      child.wasReady = true;
       resolve(true);
     };
     child.on('message', onReady);
@@ -151,13 +153,24 @@ async function runRequest(lane, request, isRetry = false) {
   });
 }
 
+async function runVerified(lane, request) {
+  const result = await runRequest(lane, request);
+  if (!result.crashed) return result;
+  if (result.reason !== 'crashed' && result.reason !== 'timeout') return { transient: false, ...result };
+  const canary = await runRequest(lane, { id: (nextRequestId += 1), operation: 'check', code: CANARY_SOURCE, language: 'tsx' });
+  if (canary.ok !== true) return { ...result, transient: true };
+  const second = await runRequest(lane, { ...request, id: (nextRequestId += 1) });
+  if (!second.crashed) return second;
+  return { transient: false, ...second };
+}
+
 export function parseSafely(code, language, operation = 'check', laneName = 'interactive') {
   if (isStopping()) return Promise.resolve(SHUTTING_DOWN);
   if (code.length > LIMITS.maxParseChars) return Promise.resolve(TOO_LARGE);
   const violation = complexityViolation(code);
-  if (violation !== null) return Promise.resolve({ crashed: true, reason: violation });
+  if (violation !== null) return Promise.resolve({ crashed: true, transient: false, reason: violation });
   const lane = lanes[laneName];
-  const run = lane.queue.then(() => runRequest(lane, { id: (nextRequestId += 1), operation, code, language }));
+  const run = lane.queue.then(() => runVerified(lane, { id: (nextRequestId += 1), operation, code, language }));
   lane.queue = run;
   return run;
 }

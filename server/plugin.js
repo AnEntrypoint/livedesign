@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createApiMiddleware } from './api.js';
+import { createOriginPartition } from './originPolicy.js';
 import { closeEventStreams } from './events.js';
 import { stylesheetPolicyPlugin } from './cssPolicy.js';
 import { APP_DIR, APP_RELOAD_PATH, LIMITS, PROJECT_ROOT } from './config.js';
@@ -11,6 +12,49 @@ import { relativeOf } from './diagnostics.js';
 import * as status from './status.js';
 
 const CHECKED_EVENTS = new Set(['add', 'change', 'unlink']);
+const STARTUP_SCAN_MAX_WAIT_MS = 8000;
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function waitForFirstPageLoad(timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    const stop = status.onPageEvent(({ type }) => {
+      if (type === 'load') finish();
+    });
+    function finish() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stop();
+      resolve();
+    }
+  });
+}
+
+async function waitForDepsOptimizerSettled(server, { maxWaitMs = 4000, quietMs = 200, pollMs = 50 } = {}) {
+  const optimizer = server.environments?.client?.depsOptimizer;
+  if (!optimizer) return;
+  const deadline = Date.now() + maxWaitMs;
+  let stableCount = -1;
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    if (optimizer.scanProcessing) {
+      await sleep(pollMs);
+      continue;
+    }
+    const metadata = optimizer.metadata;
+    const count = metadata ? Object.keys(metadata.discovered ?? {}).length + Object.keys(metadata.optimized ?? {}).length : 0;
+    if (count === stableCount) {
+      if (Date.now() - stableSince >= quietMs) return;
+    } else {
+      stableCount = count;
+      stableSince = Date.now();
+    }
+    await sleep(pollMs);
+  }
+}
 
 function viteErrorFile(error) {
   const candidate = error?.loc?.file ?? error?.id;
@@ -79,39 +123,11 @@ const SCRIPT_TAG = /<script\b[^>]*>[\s\S]*?<\/script>\s*/g;
 const HMR_SCRIPT = /@vite\/client|@react-refresh/;
 
 const LIVE_DIR = path.join(PROJECT_ROOT, 'live');
-const URL_DECODE_PASSES = 3;
 
 function isInsideDirectory(directory, file) {
   if (typeof file !== 'string') return false;
   const relative = path.relative(directory, path.resolve(file));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
-}
-
-function normalizedRequestPath(url) {
-  let decoded = url.split('?')[0];
-  for (let pass = 0; pass < URL_DECODE_PASSES; pass += 1) {
-    try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
-    } catch {
-      break;
-    }
-  }
-  return path.posix.normalize(decoded.replace(/\\/g, '/').replace(/\/{2,}/g, '/')).toLowerCase();
-}
-
-function redirectControlPageToLocalhost(request, response, next) {
-  const host = request.headers.host ?? '';
-  const onLoopbackAddress = /^127\.0\.0\.1(?::\d+)?$/.test(host);
-  const requested = normalizedRequestPath(request.url);
-  if (!onLoopbackAddress || (requested !== '/live' && !requested.startsWith('/live/'))) {
-    next();
-    return;
-  }
-  response.statusCode = 302;
-  response.setHeader('location', `http://localhost${host.slice('127.0.0.1'.length)}${request.url}`);
-  response.end();
 }
 
 function controlPageWithoutHmr() {
@@ -151,12 +167,15 @@ function appErrorPipelinePlugin() {
         stopParseWorker();
         return close();
       };
-      server.middlewares.use(redirectControlPageToLocalhost);
+      server.middlewares.use(createOriginPartition(server.config));
       interceptHotSends(server);
       watchApp(server);
       startSnapshotting(server);
       warmParseWorker().catch(() => {});
-      scanApp(server).catch((error) => server.config.logger.error(`hmr-live startup scan failed: ${error.message}`));
+      waitForFirstPageLoad(STARTUP_SCAN_MAX_WAIT_MS)
+        .then(() => waitForDepsOptimizerSettled(server))
+        .then(() => scanApp(server))
+        .catch((error) => server.config.logger.error(`hmr-live startup scan failed: ${error.message}`));
       server.middlewares.use('/api', createApiMiddleware(server));
     },
     closeBundle() {

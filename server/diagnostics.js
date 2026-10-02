@@ -80,6 +80,7 @@ export async function checkFile(server, relative) {
   const language = languageOf(relative);
   if (language) {
     const parsed = await parseSafely(source, language);
+    if (parsed.crashed && parsed.transient) return [{ kind: 'transform', file: relative, line: null, column: null, message: `${relative} could not be checked because the safe parse check is unavailable (${parsed.reason}); it is checked again on the next change`, frame: null }];
     if (parsed.crashed) return [{ kind: 'syntax', file: relative, line: null, column: null, message: UNPARSEABLE_MESSAGE, frame: null }];
     if (!parsed.ok) return [parseFailure(parsed, source, relative)];
   }

@@ -12,8 +12,8 @@ const IDS = ['status', 'app-status', 'start', 'share', 'mute', 'refresh', 'pause
 const elements = Object.fromEntries(IDS.map((id) => [id, document.getElementById(id)]));
 
 const MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'refresh_page', 'restore_last_good', 'v0_import', 'add_ui_component', 'install_packages']);
-const FRAME_SETTLE_MS = 400;
-const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const VALIDATE_DELAY_MS = 700;
+const PROMPT_COOLDOWN_MS = 1500;
 
 const runtime = {
   playback: null,
@@ -27,6 +27,8 @@ const runtime = {
   appSnapshot: null,
   autoRebuildTimer: null,
   eventsRetryMs: EVENTS_RETRY_BASE_MS,
+  lastFrameAt: 0,
+  lastPromptAt: 0,
   epoch: 0,
 };
 
@@ -81,15 +83,25 @@ const live = new LiveSession({
   onToolCall: (call, result) => logLine('tool', `${call.name}(${JSON.stringify(call.args ?? {}).slice(0, 120)}) -> ${result.error ?? result.status ?? 'ok'}`),
   onNote: (text) => logLine('note', text),
   getScreenReport: () => ({ sharing: runtime.screen !== null }),
-  beforeToolResponse: freshFrameBeforeAnswer,
+  beforeToolResponse: promptValidation,
 });
 
-async function freshFrameBeforeAnswer(responses) {
-  const changedApp = responses.some((entry) => MUTATING_TOOLS.has(entry.name) && !entry.response.error);
-  if (!changedApp || runtime.screen === null) return;
-  await sleep(FRAME_SETTLE_MS);
-  const sent = await runtime.screen.captureNow();
-  logLine('note', sent ? 'sent a fresh frame before the edit result' : 'could not capture a fresh frame');
+function promptValidation(responses) {
+  if (runtime.screen === null) return;
+  const changed = responses.some((entry) => MUTATING_TOOLS.has(entry.name) && !entry.response.error);
+  if (!changed) return;
+  const now = Date.now();
+  if (now - runtime.lastPromptAt < PROMPT_COOLDOWN_MS) return;
+  runtime.lastPromptAt = now;
+  setTimeout(() => {
+    if (runtime.screen === null) return;
+    try {
+      live.sendText('SYSTEM NOTICE (app tooling, not the user): your change was applied and the live screen view now shows the result. Look at it and confirm the intended change is actually visible before reporting success; if it is not visible, say so plainly instead of claiming success.');
+      logLine('note', 'asked Gemini to validate against the live screen view');
+    } catch (error) {
+      logLine('error', `validation prompt not sent: ${error.message}`);
+    }
+  }, VALIDATE_DELAY_MS);
 }
 
 function announceVision() {
@@ -97,7 +109,7 @@ function announceVision() {
   const sharing = runtime.screen !== null;
   if (runtime.announcedSharing === sharing) return;
   const text = sharing
-    ? 'SYSTEM NOTICE (app tooling, not the user): screen video is now shared. You receive a fresh frame of the app after every edit.'
+    ? 'SYSTEM NOTICE (app tooling, not the user): you are now watching a live view of the screen. Treat that live view as your primary validation: describe only what you actually see in it and never claim a visual result you have not observed.'
     : 'SYSTEM NOTICE (app tooling, not the user): screen video is NOT shared, so you cannot see the app. Rely on tool results only, never claim you saw something visually, and tell the user they can click Share this tab.';
   try {
     live.sendText(text);
@@ -188,7 +200,10 @@ async function share() {
   runtime.sharePending = true;
   try {
     const screen = await startScreenShare({
-      onFrame: (base64) => live.sendFrame(base64),
+      onFrame: (base64) => {
+        runtime.lastFrameAt = Date.now();
+        live.sendFrame(base64);
+      },
       onEnded: () => {
         if (runtime.epoch !== epoch) return;
         runtime.screen = null;
@@ -317,6 +332,7 @@ window.__debug = {
   get resumable() { return live.resumptionHandle !== null; },
   get events() { return [...runtime.events]; },
   get sharing() { return runtime.screen !== null; },
+  get lastFrameAt() { return runtime.lastFrameAt; },
   get microphone() { return runtime.microphone !== null; },
   get appStatus() { return runtime.appSnapshot; },
   get hmrFree() { return !performance.getEntriesByType('resource').some((entry) => /@vite\/client|@react-refresh/.test(entry.name)); },

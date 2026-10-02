@@ -1,155 +1,231 @@
-"use client"
-
-import { useState } from "react"
-import { Code2, Link, Mail, ExternalLink, ChevronRight, Menu, X } from "lucide-react"
-
+import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Github, Linkedin, Twitter, Mail, ExternalLink, MapPin } from "lucide-react"
+import { ThemeToggle } from "@/components/theme-toggle"
+import ParticleWave from "@/components/particle-wave"
 
 export default function Portfolio() {
-  const [isMenuOpen, setIsMenuOpen] = useState(false)
-
-  const projects = [
-    {
-      title: "E-Commerce Platform",
-      description: "A full-stack e-commerce solution built with Next.js, TypeScript, and Stripe integration.",
-      tags: ["Next.js", "TypeScript", "Stripe", "Tailwind CSS"],
-      link: "#",
-      github: "#"
-    },
-    {
-      title: "Task Management App",
-      description: "A collaborative task management application with real-time updates and team workspaces.",
-      tags: ["React", "Node.js", "Socket.io", "PostgreSQL"],
-      link: "#",
-      github: "#"
-    },
-    {
-      title: "AI Content Generator",
-      description: "SaaS platform that leverages OpenAI API to generate marketing content for businesses.",
-      tags: ["Vue.js", "Python", "FastAPI", "OpenAI"],
-      link: "#",
-      github: "#"
-    }
-  ]
-
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans">
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <a href="#" className="text-2xl font-bold tracking-tight">
-            Dev<span className="text-primary">Folio</span>
-          </a>
-          
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium">
-            <a href="#about" className="transition-colors hover:text-primary">About</a>
-            <a href="#projects" className="transition-colors hover:text-primary">Projects</a>
-            <a href="#contact" className="transition-colors hover:text-primary">Contact</a>
-            <Button variant="outline" size="sm">Resume</Button>
-          </nav>
-
-          <button 
-            className="md:hidden"
-            onClick={() => setIsMenuOpen(!isMenuOpen)}
-          >
-            {isMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
-          </button>
+    <div className="min-h-screen bg-background p-4 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        <div className="flex justify-end mb-6">
+          <ThemeToggle />
         </div>
 
-        {isMenuOpen && (
-          <nav className="md:hidden border-b bg-background p-4 flex flex-col gap-4">
-            <a href="#about" className="block px-2 py-1 text-sm font-medium hover:text-primary" onClick={() => setIsMenuOpen(false)}>About</a>
-            <a href="#projects" className="block px-2 py-1 text-sm font-medium hover:text-primary" onClick={() => setIsMenuOpen(false)}>Projects</a>
-            <a href="#contact" className="block px-2 py-1 text-sm font-medium hover:text-primary" onClick={() => setIsMenuOpen(false)}>Contact</a>
-            <Button variant="outline" className="w-full">Resume</Button>
-          </nav>
-        )}
-      </header>
-
-      <main className="container mx-auto px-4 py-12 md:py-24 flex flex-col gap-24">
-        <section id="about" className="flex flex-col items-start gap-6 max-w-3xl">
-          <div className="inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80">
-            Available for work
-          </div>
-          <h1 className="text-4xl md:text-6xl font-bold tracking-tight">
-            Building digital experiences that matter.
-          </h1>
-          <p className="text-xl text-muted-foreground leading-relaxed">
-            I'm a Full-Stack Developer specializing in building exceptional web applications. 
-            I focus on writing clean, scalable, and efficient code.
-          </p>
-          <div className="flex gap-4">
-            <Button variant="default">Contact Me</Button>
-            <Button variant="ghost" className="gap-2">
-              View Work <ChevronRight className="w-4 h-4" />
-            </Button>
-          </div>
-          <div className="flex gap-4 mt-4">
-            <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
-              <Code2 className="w-6 h-6" />
-            </a>
-            <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
-              <Link className="w-6 h-6" />
-            </a>
-            <a href="#" className="text-muted-foreground hover:text-foreground transition-colors">
-              <Mail className="w-6 h-6" />
-            </a>
-          </div>
-        </section>
-
-        <section id="projects" className="flex flex-col gap-12">
-          <div>
-            <h2 className="text-3xl font-bold tracking-tight">Featured Projects</h2>
-            <p className="text-muted-foreground mt-2">A selection of my recent work.</p>
-          </div>
-          
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {projects.map((project, index) => (
-              <div key={index} className="rounded-xl border bg-card text-card-foreground shadow flex flex-col overflow-hidden transition-all hover:shadow-lg">
-                <div className="flex flex-col space-y-1.5 p-6 pb-2">
-                  <h3 className="font-semibold leading-none tracking-tight text-xl">{project.title}</h3>
-                  <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-                    {project.description}
-                  </p>
+        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6 auto-rows-max">
+          {/* About Me - Tall Card (Top Left) */}
+          <Card
+            id="about"
+            className="md:col-span-3 lg:col-span-4 p-8 bg-gradient-to-br from-card to-card/50 border border-border/50 relative overflow-hidden rounded-3xl shadow-sm"
+          >
+            <div className="absolute inset-0 z-0 opacity-30">
+              <ParticleWave />
+            </div>
+            <div className="flex flex-col h-full relative z-10">
+              <div className="flex items-start gap-4 mb-4">
+                <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
+                  <span className="text-2xl font-bold text-primary font-sans">FM</span>
                 </div>
-                <div className="p-6 pt-2 flex-grow">
-                  <div className="flex flex-wrap gap-2">
-                    {project.tags.map((tag) => (
-                      <span key={tag} className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80">
-                        {tag}
-                      </span>
-                    ))}
+                <div>
+                  <h2 className="text-xl font-bold text-card-foreground font-sans">About Me</h2>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground mt-1">
+                    <MapPin className="w-4 h-4" />
+                    <span className="font-sans">Philippines</span>
                   </div>
                 </div>
-                <div className="flex items-center p-6 border-t bg-secondary/20 justify-between mt-auto">
-                  <Button variant="ghost" size="sm" className="gap-2">
-                    <Code2 className="w-4 h-4" /> Code
+              </div>
+              <p className="text-card-foreground leading-relaxed font-sans flex-1 text-sm">
+                I'm Felix Macaspac, a passionate HubSpot CMS developer from the Philippines with 5 years of experience
+                building scalable web applications and custom CMS solutions. I specialize in HubSpot development,
+                creating seamless user experiences and optimizing content management workflows. When I'm not coding,
+                you'll find me exploring new web technologies and contributing to the developer community.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-4">
+                <Badge variant="secondary" className="font-sans text-xs rounded-full">
+                  HubSpot CMS
+                </Badge>
+                <Badge variant="secondary" className="font-sans text-xs rounded-full">
+                  JavaScript
+                </Badge>
+                <Badge variant="secondary" className="font-sans text-xs rounded-full">
+                  React
+                </Badge>
+                <Badge variant="secondary" className="font-sans text-xs rounded-full">
+                  Node.js
+                </Badge>
+              </div>
+            </div>
+          </Card>
+
+          {/* Experience - Medium Card (Top Middle) */}
+          <Card
+            id="experience"
+            className="md:col-span-3 lg:col-span-2 p-8 bg-gradient-to-br from-card to-card/50 border border-border/50 relative overflow-hidden rounded-3xl shadow-sm"
+          >
+            <div className="relative z-10">
+              <h3 className="font-bold text-card-foreground mb-4 font-sans">Experience</h3>
+              <div className="space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                    <span className="text-xs font-bold text-primary font-sans">TC</span>
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-card-foreground font-sans text-sm">
+                      Senior Full Stack Developer
+                    </h4>
+                    <p className="text-xs text-muted-foreground font-sans">TechCorp Inc. • 2022 - Present</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                    <span className="text-xs font-bold text-primary font-sans">ST</span>
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-card-foreground font-sans text-sm">Full Stack Developer</h4>
+                    <p className="text-xs text-muted-foreground font-sans">StartupXYZ • 2020 - 2022</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Status - Square Card (Top Right) */}
+          <Card className="md:col-span-1 lg:col-span-1 p-8 bg-gradient-to-br from-card to-card/50 border border-border/50 relative overflow-hidden rounded-3xl shadow-sm">
+            <div className="relative z-10">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-3 h-3 rounded-full bg-primary animate-pulse"></div>
+                <h3 className="font-semibold text-card-foreground font-sans">Available</h3>
+              </div>
+              <p className="text-sm text-muted-foreground mb-4 font-sans">Open to new opportunities</p>
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-sm text-muted-foreground font-sans">Projects</span>
+                  <span className="font-semibold text-card-foreground font-sans">25+</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-muted-foreground font-sans">Experience</span>
+                  <span className="font-semibold text-card-foreground font-sans">5 years</span>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Social Links - Square Card (Bottom Left) */}
+          <Card
+            id="contact"
+            className="md:col-span-1 lg:col-span-1 p-8 bg-gradient-to-br from-card to-card/50 border border-border/50 relative overflow-hidden rounded-3xl shadow-sm"
+          >
+            <div className="relative z-10">
+              <h3 className="font-semibold text-card-foreground mb-4 font-sans">Connect</h3>
+              <div className="space-y-3">
+                <a
+                  href="#"
+                  className="flex items-center gap-3 text-card-foreground hover:text-primary hover:translate-x-1 transition-all duration-200"
+                >
+                  <Github className="w-4 h-4" />
+                  <span className="text-sm font-sans">GitHub</span>
+                </a>
+                <a
+                  href="#"
+                  className="flex items-center gap-3 text-card-foreground hover:text-primary hover:translate-x-1 transition-all duration-200"
+                >
+                  <Linkedin className="w-4 h-4" />
+                  <span className="text-sm font-sans">LinkedIn</span>
+                </a>
+                <a
+                  href="#"
+                  className="flex items-center gap-3 text-card-foreground hover:text-primary hover:translate-x-1 transition-all duration-200"
+                >
+                  <Twitter className="w-4 h-4" />
+                  <span className="text-sm font-sans">Twitter</span>
+                </a>
+                <a
+                  href="#"
+                  className="flex items-center gap-3 text-card-foreground hover:text-primary hover:translate-x-1 transition-all duration-200"
+                >
+                  <Mail className="w-4 h-4" />
+                  <span className="text-sm font-sans">Email</span>
+                </a>
+              </div>
+            </div>
+          </Card>
+
+          {/* Selected Projects - Large Card (Bottom Right) */}
+          <Card
+            id="projects"
+            className="md:col-span-3 lg:col-span-4 p-8 bg-gradient-to-br from-card to-card/50 border border-border/50 relative overflow-hidden rounded-3xl shadow-sm"
+          >
+            <div className="relative z-10">
+              <h3 className="font-bold text-card-foreground mb-4 font-sans">Selected Projects</h3>
+              <div className="space-y-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-card-foreground font-sans">E-Commerce Platform</h4>
+                    <p className="text-sm text-muted-foreground mb-2 font-sans">
+                      Modern e-commerce platform with React, Node.js, and PostgreSQL featuring payment processing and
+                      real-time inventory.
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        React
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        Node.js
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        PostgreSQL
+                      </Badge>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-3 font-sans bg-transparent hover:bg-primary/10 hover:scale-105 transition-all duration-200 rounded-full"
+                  >
+                    <ExternalLink className="w-4 h-4" />
                   </Button>
-                  <Button variant="default" size="sm" className="gap-2">
-                    <ExternalLink className="w-4 h-4" /> Live Demo
+                </div>
+
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-card-foreground font-sans">Task Management App</h4>
+                    <p className="text-sm text-muted-foreground mb-2 font-sans">
+                      Collaborative task management with real-time updates, drag-and-drop functionality, and team
+                      features.
+                    </p>
+                    <div className="flex flex-wrap gap-1">
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        Next.js
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        TypeScript
+                      </Badge>
+                      <Badge variant="outline" className="text-xs font-sans rounded-full">
+                        Socket.io
+                      </Badge>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-3 font-sans bg-transparent hover:bg-primary/10 hover:scale-105 transition-all duration-200 rounded-full"
+                  >
+                    <ExternalLink className="w-4 h-4" />
                   </Button>
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
-
-        <section id="contact" className="border rounded-2xl bg-secondary/10 p-8 md:p-16 flex flex-col items-center text-center gap-6 max-w-4xl mx-auto w-full">
-          <h2 className="text-3xl md:text-4xl font-bold tracking-tight">Let's work together.</h2>
-          <p className="text-xl text-muted-foreground max-w-2xl">
-            I'm currently open to new opportunities and freelance projects. 
-            Have a project in mind? Let's discuss how we can bring it to life.
-          </p>
-          <Button size="lg" className="gap-2 mt-4">
-            <Mail className="w-5 h-5" /> Get In Touch
-          </Button>
-        </section>
-      </main>
-
-      <footer className="border-t py-8 mt-12 text-center text-sm text-muted-foreground">
-        <div className="container mx-auto px-4">
-          <p>© {new Date().getFullYear()} DevFolio. Built with Next.js & Tailwind CSS.</p>
+            </div>
+          </Card>
         </div>
-      </footer>
+
+        {/* Footer */}
+        <footer className="mt-12 text-center">
+          <p className="text-muted-foreground text-sm font-sans">
+            Built with v0.dev • © 2025 Felix Macaspac
+          </p>
+        </footer>
+      </div>
     </div>
   )
 }

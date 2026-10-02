@@ -3,7 +3,7 @@ import { Type } from '@google/genai';
 import { LIMITS, WRITABLE_EXTENSIONS } from './config.js';
 import { ToolError } from './errors.js';
 import { sandboxed } from './paths.js';
-import { assertNotProtected, assertSafeToWrite, writeVettedFile } from './appWrite.js';
+import { assertNotProtected, assertSafeToWrite, withFileLock, writeVettedFile } from './appWrite.js';
 import { stylesheetViolation } from './cssPolicy.js';
 import { beginChange } from './guard.js';
 import { settleChange } from './settle.js';
@@ -112,7 +112,7 @@ async function withoutUnsafeFiles(items, skipped, budget, alsoPlanned = []) {
         await assertSafeToWrite(item.relative, item.content, 'bulk');
       } catch (error) {
         if (!(error instanceof ToolError)) throw error;
-        if (error.code === 'file_too_complex') budget.failures += 1;
+        if (error.code === 'file_too_complex' || error.code === 'parse_unavailable') budget.failures += 1;
         problem = error.message;
       }
     }
@@ -198,7 +198,7 @@ export const v0Handlers = {
     const local = await resolveLocalImports({ sources: plan.map((item) => item.content), planned: new Set(plan.map((item) => withoutExtension(item.relative))) });
     const { supplied, dropped } = await plansForSuppliedFiles(local.added, budget, plan);
     const change = beginChange();
-    for (const item of [...plan, ...supplied]) await writeVettedFile(item, item.content);
+    for (const item of [...plan, ...supplied]) await withFileLock(item.relative, () => writeVettedFile(item, item.content));
     const imports = await v0.importsOf(plan.map((item) => ({ path: item.relative, content: item.content })));
     return {
       ok: true,
@@ -223,7 +223,7 @@ export const v0Handlers = {
     const { supplied, dropped } = await plansForSuppliedFiles(local.added, createParseBudget());
     if (supplied.length === 0) return { ok: true, added: [], skipped: dropped, unresolvedImports: local.unresolved, note: 'Everything requested already exists, was skipped for the reasons listed, or is not a shadcn component.' };
     const change = beginChange();
-    for (const item of supplied) await writeVettedFile(item, item.content);
+    for (const item of supplied) await withFileLock(item.relative, () => writeVettedFile(item, item.content));
     return {
       ok: true,
       added: supplied.map((item) => item.relative),

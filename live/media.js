@@ -126,15 +126,10 @@ export async function startScreenShare({ onFrame, onEnded, maxWidth = 1280, inte
     return { base64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), size: blob.size };
   };
 
-  const captureNow = async () => {
-    const frame = await grabFrame();
-    if (frame) onFrame(frame.base64, frame.size);
-    return frame !== null;
-  };
-
   const tick = async () => {
     if (stopped) return;
-    await captureNow();
+    const frame = await grabFrame();
+    if (frame) onFrame(frame.base64, frame.size);
     if (!stopped) timer = setTimeout(tick, intervalMs);
   };
 
@@ -143,5 +138,5 @@ export async function startScreenShare({ onFrame, onEnded, maxWidth = 1280, inte
     onEnded();
   });
   tick();
-  return { stop, captureNow };
+  return { stop };
 }

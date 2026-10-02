@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { APP_DIR, LIMITS, LIVE_MODEL, PAGE_EVENT_TYPES, PROJECT_ROOT, RUNTIME_ERROR_KINDS } from './config.js';
 import { HttpError } from './errors.js';
+import { APP_HOSTNAME, CONTROL_HOSTNAME, classifyHost } from './originPolicy.js';
 import { runTool } from './tools.js';
 import { liveConfig, mintStatsSnapshot, mintToken } from './token.js';
 import { serveEvents } from './events.js';
@@ -31,23 +32,41 @@ async function readJsonBody(request) {
   }
 }
 
-const CONTROL_ROUTES = new Set(['POST /token', 'POST /tool', 'POST /pause', 'GET /config', 'GET /debug']);
-const CONTROL_HOSTNAME = 'localhost';
+const ROUTE_SCOPES = {
+  'GET /config': 'control',
+  'GET /status': 'control',
+  'GET /debug': 'control',
+  'POST /token': 'control',
+  'POST /pause': 'control',
+  'POST /tool': 'control',
+  'GET /events': 'both',
+  'POST /app-log': 'app',
+  'GET /reporter.js': 'app',
+};
+const SAME_ORIGIN_FETCH_SITES = new Set(['same-origin', 'none']);
 
-function assertAllowedOrigin(request, route) {
+function assertRouteAllowedForOrigin(request, route) {
+  const scope = ROUTE_SCOPES[route];
+  const host = classifyHost(request.headers.host);
+  const hostAllowed = scope === 'both' ? host.kind === 'control' || host.kind === 'app' : host.kind === scope;
+  if (!hostAllowed) {
+    const where = scope === 'control' ? `http://${CONTROL_HOSTNAME}/live/` : `http://${APP_HOSTNAME}/app/`;
+    throw new HttpError(403, 'wrong_origin_for_route', `${route} is only available to pages served from ${where}`);
+  }
+  const fetchSite = request.headers['sec-fetch-site'];
+  if (fetchSite !== undefined && !SAME_ORIGIN_FETCH_SITES.has(fetchSite)) {
+    throw new HttpError(403, 'cross_site_forbidden', 'cross-site requests are not allowed');
+  }
   const origin = request.headers.origin;
-  if (!origin) return;
+  if (origin === undefined) return;
   let parsed;
   try {
     parsed = new URL(origin);
   } catch {
     throw new HttpError(403, 'cross_origin_forbidden', 'malformed origin');
   }
-  if (parsed.host !== request.headers.host) {
+  if (parsed.protocol !== 'http:' || parsed.host !== request.headers.host) {
     throw new HttpError(403, 'cross_origin_forbidden', 'cross-origin requests are not allowed');
-  }
-  if (CONTROL_ROUTES.has(route) && parsed.hostname !== CONTROL_HOSTNAME) {
-    throw new HttpError(403, 'control_origin_required', `this route is only available to the control page at http://${CONTROL_HOSTNAME}:${parsed.port}/live/, not to app pages`);
   }
 }
 
@@ -156,19 +175,20 @@ export function createApiMiddleware(server) {
 
   return async (request, response, next) => {
     const route = `${request.method} ${request.url.split('?')[0]}`;
-    if (route === 'GET /reporter.js') {
-      response.setHeader('content-type', 'text/javascript');
-      response.setHeader('cache-control', 'no-store');
-      response.end(fs.readFileSync(REPORTER_SOURCE_PATH));
-      return;
-    }
     const streaming = route === 'GET /events';
-    if (!streaming && !Object.hasOwn(routes, route)) {
+    const isReporter = route === 'GET /reporter.js';
+    if (!isReporter && !streaming && !Object.hasOwn(routes, route)) {
       next();
       return;
     }
     try {
-      assertAllowedOrigin(request, route);
+      assertRouteAllowedForOrigin(request, route);
+      if (isReporter) {
+        response.setHeader('content-type', 'text/javascript');
+        response.setHeader('cache-control', 'no-store');
+        response.end(fs.readFileSync(REPORTER_SOURCE_PATH));
+        return;
+      }
       if (streaming) {
         serveEvents(request, response);
         return;
